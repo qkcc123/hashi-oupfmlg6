@@ -62,7 +62,7 @@ canvas{position:fixed;left:0;top:0;width:100%;height:100%;display:block;touch-ac
 const config = {
   H: 360, minW: 480, GY: 250,
   vmax: 170, accel: 300, brake: 700, crossV: 85,
-  gapPattern: [0.26, 0.44, 0.32, 0.5, 0.23, 0.38], riverDist: 780, stopGap: 70,
+  gapPattern: [0.26, 0.44, 0.32, 0.5, 0.23, 0.38], riverDist: 900, stopGap: 70,
   sceneOrder: ['river', 'river', 'crossing', 'river', 'station'],
   maxArch: 80, archA: 26, shapeBlend: 0.45, maxSlope: 0.55,
   sampleStep: 8, plankEvery: 2,
@@ -422,11 +422,12 @@ function sceneCenter(c) { return c.kind === 'station' ? (c.pL + c.pR) / 2 - S.W 
 // 走行中のカメラ: ふだんは電車を左寄り(0.32)で追い、止まる位置が近づくと少し先回りして、
 // 電車が止まる前に止まる位置のカメラ(sceneCenter)に着いて静止する
 function runTarget(c) {
-  const dist = c.L - config.stopGap - S.trainX, k = clamp(1 - dist / 520, 0, 1);
-  // 走り出した直後は先回りを0から少しずつ効かせる(切りかえの瞬間にカメラががくっと動かないように)
+  // 止まる位置まで1300pxを切ったらカメラは次の川(踏切・駅)へ先に移りはじめ、800pxで着いて静止する。
+  // 電車はそのあと画面の左から入ってきて止まる(川の全体が見えた状態で、早めになぞり始められる)
+  const dist = c.L - config.stopGap - S.trainX, k = clamp((1300 - dist) / 500, 0, 1);
   const ramp = S.state === 'RUN' ? clamp(S.stateT / 1.6, 0, 1) : 1;
   const e = k * k * (3 - 2 * k) * ramp * ramp * (3 - 2 * ramp);
-  return Math.min(S.trainX - (0.32 - 0.2 * e) * S.W, sceneCenter(c));
+  return (S.trainX - 0.32 * S.W) * (1 - e) + sceneCenter(c) * e;
 }
 function adoptPointer() {
   for (const [id, p] of S.active) {
@@ -501,8 +502,8 @@ function update(dt) {
       moveTrain(dt, Math.min(config.vmax, 8 + dist * 1.6));
       if (dist <= 0.6) { S.trainX = stopAt; S.vel = 0; S.geom = trainGeom(); go('STOP'); break; }
       // 止まる前でも、減速が始まったら(川や踏切が見えてきたら)なぞり/タップを受け付ける。電車はそのまま止まる位置まで進む
-      // カメラが川(踏切)の位置で止まったら = 川の全体が見えたら受け付ける
-      const armed = runTarget(cur) >= sceneCenter(cur) - 4 && Math.abs(S.camX - sceneCenter(cur)) < 24;
+      // 川(踏切)の全体が画面に入ったら受け付ける(カメラが移動中でも。なぞり中はカメラを止める)
+      const armed = cur.L - 30 - S.camX > 0 && cur.R + 70 - S.camX < S.W && S.camX > S.trainX - 0.5 * S.W;
       if (armed && cur.kind === 'river' && adoptPointer()) break;
       if (armed && cur.kind === 'crossing' && [...S.active.values()].some(p => !p.palm)) { S.bellT = 0; go('GATE'); }
       break;
@@ -644,7 +645,7 @@ function update(dt) {
   else target = center;
   // どの場面の切りかえでもカメラが飛ばないよう、1フレームで動ける量に上限をつける(電車の速さ+ゆとり)
   const want = (target - S.camX) * (1 - Math.exp(-dt * 3.2));
-  const lim = (S.vel * 1.25 + 220) * dt;
+  const lim = (S.vel * 1.25 + 320) * dt;
   S.camX += clamp(want, -lim, lim);
 
   for (let i = S.particles.length - 1; i >= 0; i--) {
@@ -1789,7 +1790,7 @@ function frame(t) {
   render();
 }
 resize();
-S.cur = makeRiver(S.trainX, 480);
+S.cur = makeRiver(S.trainX, 700);
 S.rivers.push(S.cur);
 S.upcoming = makeScene(1, S.cur.R);
 S.camX = S.trainX - 0.32 * S.W;
