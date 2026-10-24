@@ -85,7 +85,7 @@ const ctx = canvas.getContext('2d');
 const S = {
   W: 640, s: 1, oy: 0, dpr: 1, cw: 640, ch: 360, portrait: false, menuOpen: false,
   camX: 0, trainX: 120, vel: 0, time: 0, state: 'READY', stateT: 0, callT: 0, ftAvg: 0.016, lowFx: false,
-  rivers: [], crossings: [], stations: [], riders: [], tapQueue: 0, cur: null, bellT: 0, riverCount: 0,
+  rivers: [], crossings: [], stations: [], upcoming: null, riders: [], tapQueue: 0, cur: null, bellT: 0, riverCount: 0,
   stroke: [], primary: null, active: new Map(), idle: 0, lastMove: 0, strokeDone: false,
   sceneNo: 0, fishT: 3, shake: 0, heartT: 0, drawDist: 0, jiggle: 0, sunSpin: 0, lastToot: -9, particles: [], animals: [], hopY: 0, wave: false, rw: {}, smokeT: 0, tickX: 0, geom: [], lastPon: 0
 };
@@ -310,14 +310,23 @@ function makeStation(afterX) {
     alighter: { kind: ['bear', 'rabbit', 'cat'][(Math.random() * 3) | 0], x: 0, y: 0, t: -1 }, nextT: 0
   };
 }
+// 場面を1つ作って、描画用のリストに入れる
+function makeScene(no, afterX) {
+  const kind = config.sceneOrder[no % config.sceneOrder.length];
+  const s = kind === 'crossing' ? makeCrossing(afterX) : kind === 'station' ? makeStation(afterX) : makeRiver(afterX);
+  (kind === 'crossing' ? S.crossings : kind === 'station' ? S.stations : S.rivers).push(s);
+  return s;
+}
+// 次の場面は1つ先まで前もって置いておく(画面に入ってから突然あらわれないように)。
+// 通りすぎて画面の外へ出たものだけ片づける
 function nextScene() {
   S.sceneNo++;
-  const kind = config.sceneOrder[S.sceneNo % config.sceneOrder.length];
-  S.cur = kind === 'crossing' ? makeCrossing(S.cur.R) : kind === 'station' ? makeStation(S.cur.R) : makeRiver(S.cur.R);
-  (kind === 'crossing' ? S.crossings : kind === 'station' ? S.stations : S.rivers).push(S.cur);
-  while (S.rivers.length > 3) S.rivers.shift();
-  while (S.crossings.length > 2) S.crossings.shift();
-  while (S.stations.length > 2) S.stations.shift();
+  S.cur = S.upcoming;
+  S.upcoming = makeScene(S.sceneNo + 1, S.cur.R);
+  const gone = s => s !== S.cur && s !== S.upcoming && Math.max(s.R, s.pR || 0) < S.camX - 300;
+  S.rivers = S.rivers.filter(s => !gone(s));
+  S.crossings = S.crossings.filter(s => !gone(s));
+  S.stations = S.stations.filter(s => !gone(s));
   S.animals = S.animals.filter(a => a.x > S.camX - 200);
   go('RUN');
 }
@@ -413,7 +422,10 @@ function sceneCenter(c) { return c.kind === 'station' ? (c.pL + c.pR) / 2 - S.W 
 // 走行中のカメラ: ふだんは電車を左寄り(0.32)で追い、止まる位置が近づくと少し先回りして、
 // 電車が止まる前に止まる位置のカメラ(sceneCenter)に着いて静止する
 function runTarget(c) {
-  const dist = c.L - config.stopGap - S.trainX, k = clamp(1 - dist / 520, 0, 1), e = k * k * (3 - 2 * k);
+  const dist = c.L - config.stopGap - S.trainX, k = clamp(1 - dist / 520, 0, 1);
+  // 走り出した直後は先回りを0から少しずつ効かせる(切りかえの瞬間にカメラががくっと動かないように)
+  const ramp = S.state === 'RUN' ? clamp(S.stateT / 1.6, 0, 1) : 1;
+  const e = k * k * (3 - 2 * k) * ramp * ramp * (3 - 2 * ramp);
   return Math.min(S.trainX - (0.32 - 0.2 * e) * S.W, sceneCenter(c));
 }
 function adoptPointer() {
@@ -604,15 +616,17 @@ function update(dt) {
   if (S.smokeT <= 0 && e && S.state !== 'STOP') { smoke(e.chim.x, e.chim.y); S.smokeT = S.vel > 5 ? 0.1 : 0.35; }
 
   let target;
+  // 場面が切りかわったフレームでも新しい場面を見る(更新の最初に読んだ cur は古い場面のことがある)
+  const cc = S.cur;
   // 止まっている間は「電車の先頭〜右岸」を画面の中央に
-  const center = sceneCenter(cur);
+  const center = sceneCenter(cc);
   if (S.state === 'DRAW') target = S.camX;
   // 走行中は電車を追い、川(踏切・駅)の位置まで来たらそこで止まって、電車が画面に入ってきて止まる
-  else if (S.state === 'RUN') target = runTarget(cur);
+  else if (S.state === 'RUN') target = runTarget(cc);
   else if (S.state === 'READY') target = S.trainX - 0.32 * S.W;
-  else if (S.state === 'REWARD' && cur.kind === 'crossing') {
+  else if (S.state === 'REWARD' && cc.kind === 'crossing') {
     // 車が踏切を渡り終えるまでは踏切を画面に残し、そのあと電車にゆっくり追いつく
-    const hold = Math.min(Math.max(center, S.trainX - 0.85 * S.W), cur.x - 120), rt = rewardDur(cur);
+    const hold = Math.min(Math.max(center, S.trainX - 0.85 * S.W), cc.x - 120), rt = rewardDur(cc);
     const u = clamp((S.stateT - 2.6) / (rt - 2.6), 0, 1), e = u * u * (3 - 2 * u);
     target = hold + (S.trainX - 0.32 * S.W - hold) * e;
   }
@@ -624,10 +638,12 @@ function update(dt) {
     const u = clamp(S.stateT / config.departTime, 0, 1), k = 0.62 - 0.3 * u * u * (3 - 2 * u);
     target = Math.max(center, S.trainX - k * S.W);
   }
-  else if (S.state === 'CROSS' || S.state === 'PASS') target = Math.max(center, S.trainX - 0.62 * S.W);
+  // 踏切を通過中も、踏切を画面に残したまま(このあと車が渡るのを見せるため)
+  else if (S.state === 'PASS') target = Math.min(Math.max(center, S.trainX - 0.85 * S.W), cc.x - 120);
+  else if (S.state === 'CROSS') target = Math.max(center, S.trainX - 0.62 * S.W);
   else target = center;
   // どの場面の切りかえでもカメラが飛ばないよう、1フレームで動ける量に上限をつける(電車の速さ+ゆとり)
-  const want = (target - S.camX) * (1 - Math.exp(-dt * (S.state === 'RUN' && S.stateT > 1.5 ? 3.5 : 3)));
+  const want = (target - S.camX) * (1 - Math.exp(-dt * 3.2));
   const lim = (S.vel * 1.25 + 220) * dt;
   S.camX += clamp(want, -lim, lim);
 
@@ -1775,6 +1791,7 @@ function frame(t) {
 resize();
 S.cur = makeRiver(S.trainX, 480);
 S.rivers.push(S.cur);
+S.upcoming = makeScene(1, S.cur.R);
 S.camX = S.trainX - 0.32 * S.W;
 S.geom = trainGeom();
 // 絵の準備ができてから始める(読み込みに失敗した絵は簡易描画で代用。最長2秒で開始)
