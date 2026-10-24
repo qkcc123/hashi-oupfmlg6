@@ -62,7 +62,7 @@ canvas{position:fixed;left:0;top:0;width:100%;height:100%;display:block;touch-ac
 const config = {
   H: 360, minW: 480, GY: 250,
   vmax: 170, accel: 300, brake: 700, crossV: 85,
-  gapPattern: [0.26, 0.44, 0.32, 0.5, 0.23, 0.38], riverDist: 900, stopGap: 70,
+  gapPattern: [0.26, 0.44, 0.32, 0.5, 0.23, 0.38], riverDist: 900, stopGap: 70, finishOver: 26,
   sceneOrder: ['river', 'river', 'crossing', 'river', 'station'],
   maxArch: 80, archA: 26, shapeBlend: 0.45, maxSlope: 0.55,
   sampleStep: 8, plankEvery: 2,
@@ -291,8 +291,10 @@ function sag(r, x) {
 function makeRiver(afterX, dist) {
   const L = afterX + (dist || config.riverDist + rand(0, 160));
   const gap = S.W * clamp(config.gapPattern[S.riverCount % config.gapPattern.length] + rand(-0.025, 0.025), 0.2, 0.52);
+  // 小さい画面では、汽車を画面に入れたまま向こう岸の先まで指が届くよう、いちばん広い川を少しせまく
+  const gapFit = Math.min(gap, S.W - 350);
   const type = defs.bridges.order[(S.riverCount++) % defs.bridges.order.length];
-  return { kind: 'river', type, L, R: L + gap, bridge: null, bt: 0, plankN: 0, burst: false };
+  return { kind: 'river', type, L, R: L + gapFit, bridge: null, bt: 0, plankN: 0, burst: false };
 }
 // 踏切: L〜R が道路の幅。gate は遮断機の下がり具合(0=上がっている,1=下りている)、carT は車の進み具合
 function makeCrossing(afterX) {
@@ -421,13 +423,16 @@ function updateStation(st, dt) {
 function sceneCenter(c) { return c.kind === 'station' ? (c.pL + c.pR) / 2 - S.W / 2 : (c.L - config.stopGap + c.R) / 2 - S.W / 2; }
 // 走行中のカメラ: ふだんは電車を左寄り(0.32)で追い、止まる位置が近づくと少し先回りして、
 // 電車が止まる前に止まる位置のカメラ(sceneCenter)に着いて静止する
+// 汽車の最後尾が画面に入っている限界のカメラ位置(これより右へは行かない=汽車を置いていかない)
+function trainKeep() { return S.trainX - TRAIN_LEN - 16; }
 function runTarget(c) {
-  // 止まる位置まで1300pxを切ったらカメラは次の川(踏切・駅)へ先に移りはじめ、800pxで着いて静止する。
-  // 電車はそのあと画面の左から入ってきて止まる(川の全体が見えた状態で、早めになぞり始められる)
-  const dist = c.L - config.stopGap - S.trainX, k = clamp((1300 - dist) / 500, 0, 1);
+  // 止まる位置が近づくと、カメラは次の川(踏切・駅)のほうへ少しずつ先回りする。
+  // ただし汽車の最後尾が画面から出ない範囲まで(汽車を置いていかない)
+  const dist = c.L - config.stopGap - S.trainX, k = clamp((1100 - dist) / 600, 0, 1);
   const ramp = S.state === 'RUN' ? clamp(S.stateT / 1.6, 0, 1) : 1;
   const e = k * k * (3 - 2 * k) * ramp * ramp * (3 - 2 * ramp);
-  return (S.trainX - 0.32 * S.W) * (1 - e) + sceneCenter(c) * e;
+  const want = (S.trainX - 0.32 * S.W) * (1 - e) + sceneCenter(c) * e;
+  return Math.min(want, trainKeep());
 }
 function adoptPointer() {
   for (const [id, p] of S.active) {
@@ -503,7 +508,7 @@ function update(dt) {
       if (dist <= 0.6) { S.trainX = stopAt; S.vel = 0; S.geom = trainGeom(); go('STOP'); break; }
       // 止まる前でも、減速が始まったら(川や踏切が見えてきたら)なぞり/タップを受け付ける。電車はそのまま止まる位置まで進む
       // 川(踏切)の全体が画面に入ったら受け付ける(カメラが移動中でも。なぞり中はカメラを止める)
-      const armed = cur.L - 30 - S.camX > 0 && cur.R + 70 - S.camX < S.W && S.camX > S.trainX - 0.5 * S.W;
+      const armed = cur.L - 30 - S.camX > 0 && (cur.L + cur.R) / 2 + 40 - S.camX < S.W;
       if (armed && cur.kind === 'river' && adoptPointer()) break;
       if (armed && cur.kind === 'crossing' && [...S.active.values()].some(p => !p.palm)) { S.bellT = 0; go('GATE'); }
       break;
@@ -621,7 +626,10 @@ function update(dt) {
   const cc = S.cur;
   // 止まっている間は「電車の先頭〜右岸」を画面の中央に
   const center = sceneCenter(cc);
-  if (S.state === 'DRAW') target = S.camX;
+  if (S.state === 'DRAW') {
+    const need = cc.R + config.finishOver + 70 - S.W;
+    target = need > S.camX ? Math.max(S.camX, Math.min(need, cc.kind === 'station' ? need : trainKeep())) : S.camX;
+  }
   // 走行中は電車を追い、川(踏切・駅)の位置まで来たらそこで止まって、電車が画面に入ってきて止まる
   else if (S.state === 'RUN') target = runTarget(cc);
   else if (S.state === 'READY') target = S.trainX - 0.32 * S.W;
@@ -641,11 +649,12 @@ function update(dt) {
   }
   // 踏切を通過中も、踏切を画面に残したまま(このあと車が渡るのを見せるため)
   else if (S.state === 'PASS') target = Math.min(Math.max(center, S.trainX - 0.85 * S.W), cc.x - 120);
-  else if (S.state === 'CROSS') target = Math.max(center, S.trainX - 0.62 * S.W);
-  else target = center;
+  // 渡りはじめは、汽車の動きに合わせてカメラも止まった状態から動きだす
+  else if (S.state === 'CROSS') target = Math.min(Math.max(center, S.trainX - 0.62 * S.W), Math.max(trainKeep(), S.camX));
+  else target = cc.kind === 'station' ? center : Math.min(center, Math.max(trainKeep(), S.camX));
   // どの場面の切りかえでもカメラが飛ばないよう、1フレームで動ける量に上限をつける(電車の速さ+ゆとり)
   const want = (target - S.camX) * (1 - Math.exp(-dt * 3.2));
-  const lim = (S.vel * 1.25 + 320) * dt;
+  const lim = S.state === 'DRAW' ? 110 * dt : (S.vel * 1.25 + 320) * dt;
   S.camX += clamp(want, -lim, lim);
 
   for (let i = S.particles.length - 1; i >= 0; i--) {
@@ -716,7 +725,8 @@ function onMove(e) {
       if (S.stroke.length < 400) S.stroke.push({ x: w.x, y: w.y });
       S.lastMove = S.time;
       if (Math.random() < 0.5) sparks(w.x, w.y, 1);
-      if (w.x >= S.cur.R - 6) { S.strokeDone = true; startBuild(S.stroke); }
+      // 向こう岸の地面の上まで指が来たら完成(岸の手前で線が切れないように)。指を離したときも完成
+      if (w.x >= S.cur.R + config.finishOver) { S.strokeDone = true; startBuild(S.stroke); }
     }
   }
 }
@@ -1690,6 +1700,14 @@ function drawGuide() {
   const a = guiding ? 1 : 0.3, pulse = 0.5 + 0.5 * Math.sin(S.time * (emph ? 9 : 5));
   const archAt = t => GY - 8 - 30 * 4 * t * (1 - t);
   const nDots = Math.max(8, Math.round(gap / 16));
+  // ゴール(向こう岸の上)に光る星。ここまでなぞればいいことを絵で示す
+  {
+    const gx = r.R + config.finishOver, gy = GY - 12, p = 0.5 + 0.5 * Math.sin(S.time * 4);
+    ctx.save(); ctx.globalAlpha = guiding ? 1 : 0.6;
+    circ(gx, gy, 14 + p * 6, 'rgba(255,240,150,.45)');
+    ctx.translate(gx, gy); ctx.rotate(Math.sin(S.time * 2) * 0.2); starPath(9 + p * 2); fs('#ffe066', '#e0a020', 1.6);
+    ctx.restore();
+  }
   for (let i = 0; i <= nDots; i++) {
     const t = i / nDots, x = r.L + gap * t, y = archAt(t);
     ctx.globalAlpha = a * (0.4 + 0.5 * pulse);
@@ -1701,7 +1719,8 @@ function drawGuide() {
   if (guiding) {
     const cyc = emph ? 1.6 : 2.4, u = (S.time % cyc) / cyc, t0 = clamp(u / 0.7, 0, 1), t = t0 * t0 * (3 - 2 * t0);
     ctx.globalAlpha = clamp(u / 0.06, 0, 1) * clamp((1 - u) / 0.12, 0, 1);
-    const x = r.L + gap * t, y = archAt(t);
+    // 指のお手本も、ゴールの星(向こう岸の上)までなぞる
+    const span = gap + config.finishOver, x = r.L + span * t, y = x <= r.R ? archAt((x - r.L) / gap) : GY - 10;
     circ(x, y, 10 + 8 * pulse, 'rgba(255,255,255,.55)');
     drawFinger(x, y, emph ? 1.25 : 1);
     ctx.globalAlpha = 1;
