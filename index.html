@@ -932,7 +932,7 @@ const SPRITE_DEFS = {
     body: '<circle r="28" fill="url(#s)" stroke="#f0a83a" stroke-opacity=".55" stroke-width="1.6"/>' +
       '<path d="M-13,-3 Q-8.5,-9 -4,-3 M4,-3 Q8.5,-9 13,-3" stroke="#8a5a26" stroke-width="2.2" fill="none" stroke-linecap="round"/>' +
       '<ellipse cx="-15" cy="6" rx="4.5" ry="3" fill="#ff9e7a" opacity=".55"/><ellipse cx="15" cy="6" rx="4.5" ry="3" fill="#ff9e7a" opacity=".55"/>' +
-      '<path d="M-7,5 Q0,13 7,5" stroke="#8a5a26" stroke-width="2.2" fill="#ff8a70" fill-opacity=".5" stroke-linecap="round"/>' +
+      '<path d="M-6.5,5.5 Q0,11 6.5,5.5" stroke="#8a5a26" stroke-width="2.2" fill="none" stroke-linecap="round"/>' +
       '<ellipse cx="-9" cy="-14" rx="8" ry="4.5" fill="#fff" opacity=".45" transform="rotate(-25 -9 -14)"/>'
   },
   sunRays: {
@@ -1427,9 +1427,7 @@ function drawRider(kind, x, y, sc, wave, i) {
   const c = ANIMAL_COL[kind];
   ctx.save(); ctx.translate(x, y); ctx.scale(sc, sc);
   ctx.fillStyle = 'rgba(40,30,20,.16)'; ctx.beginPath(); ctx.ellipse(0, 1, 18, 3.5, 0, 0, 6.2832); ctx.fill();
-  ctx.save(); ctx.translate(11, -36); ctx.rotate(wave ? 0.75 + Math.sin(S.time * 8 + i) * 0.45 : 0.25);
-  rr(-4.5, -21, 9, 24, 4.5); fs(c.arm, c.ol, 1.4);
-  ctx.restore();
+  drawAnimalArm(c, S.time + i * 0.7, wave);
   spr(kind, 0, 0);
   ctx.restore();
 }
@@ -1544,13 +1542,14 @@ function drawCar(g) {
       spr(r.kind, wx, -9.5, 0.3);
       ctx.restore();
     });
-    if (S.wave) for (const hx of [-6, 18]) {
-      const sw = Math.sin(S.time * 8 + hx) * 3, ex = hx + 2 + sw, ey = -39;
-      ctx.lineCap = 'round';
-      ctx.strokeStyle = '#b5835f'; ctx.lineWidth = 4.2; ctx.beginPath(); ctx.moveTo(hx, -26); ctx.lineTo(ex, ey); ctx.stroke();
-      circ(ex, ey, 3, '#b5835f');
-      ctx.strokeStyle = '#ffd9bf'; ctx.lineWidth = 2.6; ctx.beginPath(); ctx.moveTo(hx, -26); ctx.lineTo(ex, ey); ctx.stroke();
-      circ(ex, ey, 2.2, '#ffd9bf');
+    if (S.wave) for (const side of [0, 1]) {
+      const k = (ci - 1) * 2 + side, r = S.riders[k], wx = side ? 12 : -12;
+      const col = r && !r.pending ? ANIMAL_COL[r.kind] : { arm: '#ffd9bf', ol: '#b5835f' };
+      const wag = Math.sin(S.time * 6.5 + k * 1.3) * 1.8, bx = wx + 6.2, hx = wx + 5.4 + wag, hy = -29.5;
+      ctx.save(); rr(wx - 8, -34, 16, 15, 4.5); ctx.clip(); ctx.lineCap = 'round';
+      ctx.strokeStyle = col.ol; ctx.lineWidth = 3.6; ctx.beginPath(); ctx.moveTo(bx, -18); ctx.lineTo(hx, hy); ctx.stroke(); circ(hx, hy, 2.9, col.ol);
+      ctx.strokeStyle = col.arm; ctx.lineWidth = 2.2; ctx.beginPath(); ctx.moveTo(bx, -18); ctx.lineTo(hx, hy); ctx.stroke(); circ(hx, hy, 2.2, col.arm);
+      ctx.restore();
     }
     drawWheel(-12, -7, 6); drawWheel(12, -7, 6);
   }
@@ -1565,16 +1564,28 @@ function drawCarSimple(c) {
   rr(-23, -42, 46, 34, 8); fs(c.color, OUTLINE);
   for (const wx of [-18, 3]) { rr(wx, -36, 15, 15, 4); fs('#cfeeff', OUTLINE, 2); drawFace(wx + 7.5, -28, 5.5); }
 }
+// 動物の腕(胴より先に描いて、肩の付け根は胴で隠す)。wave=手を振る/false=下ろしている
+function drawAnimalArm(c, t, wave) {
+  const sh = { x: 11, y: -33 };
+  let pts;
+  if (wave) {
+    const wag = Math.sin(t * 6.5) * 0.42, el = { x: 21, y: -44 + wag * 1.2 };
+    const a = -Math.PI / 2 + 0.15 + wag;
+    pts = [sh, el, { x: el.x + Math.cos(a) * 13, y: el.y + Math.sin(a) * 13 }];
+  } else pts = [sh, { x: 16, y: -17 }];
+  const hand = pts[pts.length - 1];
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  const limb = () => { ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); };
+  limb(); ctx.strokeStyle = c.ol; ctx.lineWidth = 9.6; ctx.stroke(); circ(hand.x, hand.y, 5.7, c.ol);
+  limb(); ctx.strokeStyle = c.arm; ctx.lineWidth = 7; ctx.stroke(); circ(hand.x, hand.y, 4.5, c.arm);
+}
 function drawAnimal(a) {
   const age = S.time - a.t0; if (age < 0) return;
   const sc = easeOutBack(clamp(age / 0.35, 0, 1));
   const c = ANIMAL_COL[a.kind];
   ctx.save(); ctx.translate(a.x, a.y); ctx.scale(sc, sc);
   ctx.fillStyle = 'rgba(40,70,30,.18)'; ctx.beginPath(); ctx.ellipse(0, 1, 20, 4, 0, 0, 6.2832); ctx.fill();
-  // 手をふる腕(胴より先に描き、付け根を胴で隠す)
-  ctx.save(); ctx.translate(11, -36); ctx.rotate(0.75 + Math.sin(age * 9) * 0.45);
-  rr(-4.5, -21, 9, 24, 4.5); fs(c.arm, c.ol, 1.4);
-  ctx.restore();
+  drawAnimalArm(c, age, true);
   spr(a.kind, 0, 0);
   ctx.restore();
 }
@@ -1768,7 +1779,7 @@ S.camX = S.trainX - 0.32 * S.W;
 S.geom = trainGeom();
 // 絵の準備ができてから始める(読み込みに失敗した絵は簡易描画で代用。最長2秒で開始)
 Promise.race([loadSprites(), new Promise(r => setTimeout(r, 2000))]).then(() => requestAnimationFrame(frame));
-if (/[?&]debug\b/.test(location.search)) window.__nz = { S, makeBridge, sag, config, SPR };
+if (/[?&]debug\b/.test(location.search)) window.__nz = { S, makeBridge, sag, config, SPR, ctx, drawAnimal, drawRider, drawCar, drawSky, sunPos };
 })();
 </script>
 </body>
