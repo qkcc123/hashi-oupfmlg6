@@ -288,7 +288,38 @@ const audio = {
   echoToot() { this.toot(); this.blast(0.38, 0.3, 0.09); this.blast(0.76, 0.3, 0.04); },
   // ぽわっ(雲)
   puff() { this.tone(260, { dur: 0.25, type: 'sine', gain: 0.16, slide: 1.6 }); this.noise(0.25, 0.05, 900); },
-  cry(kind) { this.pop(); },
+  // 動物の鳴き声(声の高さの動き+口の形のフィルタで合成。こわくない・大きすぎない音)
+  // f: [[秒, 高さHz], ...]、fm: [[秒, 第1フォルマント, 第2フォルマント], ...]
+  voice(f, fm, dur, gain, delay) {
+    const c = this.ctx; if (!c || this.muted) return;
+    const t = c.currentTime + (delay || 0);
+    const o = c.createOscillator(); o.type = 'sawtooth';
+    o.frequency.setValueAtTime(f[0][1], t); f.slice(1).forEach(([s, v]) => o.frequency.linearRampToValueAtTime(v, t + s));
+    const out = c.createGain();
+    out.gain.setValueAtTime(0.0001, t); out.gain.linearRampToValueAtTime(gain, t + 0.03);
+    out.gain.setValueAtTime(gain, t + dur * 0.6); out.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    [1, 2].forEach(k => {
+      const bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = k === 1 ? 5 : 7;
+      bp.frequency.setValueAtTime(fm[0][k], t); fm.slice(1).forEach(p => bp.frequency.linearRampToValueAtTime(p[k], t + p[0]));
+      const g = c.createGain(); g.gain.value = k === 1 ? 1 : 0.6;
+      o.connect(bp); bp.connect(g); g.connect(out);
+    });
+    const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 3200;
+    out.connect(lp); lp.connect(this.master);
+    o.start(t); o.stop(t + dur + 0.05);
+  },
+  lastCry: {},
+  cry(kind) {
+    const c = this.ctx; if (!c || this.muted) return;
+    if (c.currentTime - (this.lastCry[kind] || -9) < 0.35) return;
+    this.lastCry[kind] = c.currentTime;
+    if (kind === 'cat') this.voice([[0, 480], [0.12, 760], [0.4, 620], [0.62, 430]], [[0, 350, 2300], [0.15, 800, 1500], [0.62, 700, 1200]], 0.65, 0.5);
+    else if (kind === 'dog') [0, 0.3].forEach(d => { this.voice([[0, 330], [0.05, 500], [0.18, 270]], [[0, 500, 900], [0.06, 800, 1300], [0.2, 650, 1100]], 0.2, 0.55, d); this.noise(0.06, 0.04, 900); });
+    else if (kind === 'bear') this.voice([[0, 140], [0.15, 190], [0.5, 170], [0.75, 120]], [[0, 400, 800], [0.2, 600, 950], [0.75, 450, 800]], 0.8, 0.6);
+    else if (kind === 'rabbit') { this.tone(420, { dur: 0.13, gain: 0.24, slide: 2.8 }); this.tone(640, { dur: 0.16, gain: 0.2, slide: 2.4, delay: 0.15 }); }
+    else if (kind === 'bird') [0, 0.1, 0.2].forEach(d => this.tone(2600 + d * 900, { dur: 0.07, gain: 0.16, slide: 1.35, delay: d }));
+    else this.pop();
+  },
   twinkle() { [1568, 2093, 2637].forEach((f, i) => this.tone(f, { dur: 0.18, gain: 0.1, delay: i * 0.06 })); }
 };
 try { audio.muted = localStorage.getItem('nazotte.muted') === '1'; } catch (e) {}
@@ -563,6 +594,29 @@ function pokeScenery(w, lx, ly) {
   }
   return false;
 }
+function pokeCreature(w) {
+  for (const a of S.animals) if (a.popped && Math.abs(w.x - a.x) < 28 && w.y > a.y - 72 && w.y < a.y + 8) {
+    a.hop = S.time; audio.cry(a.kind); sparks(a.x, a.y - 50, 5); return true;
+  }
+  // 窓の乗客(客車だけ。機関車は汽笛)
+  if (!trainHidden()) for (let ci = 1; ci < S.geom.length; ci++) {
+    const g = S.geom[ci];
+    if (Math.abs(w.x - g.cx) > 22 || w.y < g.cy - 40 || w.y > g.cy - 14) continue;
+    const k = (ci - 1) * 2 + (w.x > g.cx ? 1 : 0), r = S.riders[k];
+    if (!r || r.pending) return false;
+    audio.cry(r.kind); S.jiggle = 0.3; sparks(w.x, w.y - 6, 4);
+    return true;
+  }
+  // 踏切で待っている車: ププッ
+  for (const c of S.crossings) {
+    const car = crossingCar(c);
+    if (car.y < 470 && Math.abs(w.x - c.x) < 34 * car.sc + 8 && w.y > car.y - 52 * car.sc - 6 && w.y < car.y + 6) {
+      if (S.time - (c.tapHonk || -9) > 0.5) { c.tapHonk = S.time; audio.honk(); }
+      return true;
+    }
+  }
+  return false;
+}
 function updateScenery(dt) {
   for (const [i, pk] of S.peeks) if (S.time - pk.t0 > PEEK_UP * 2 + PEEK_STAY) S.peeks.delete(i);
   for (const [i, t] of S.puffs) if (S.time - t > 0.6) S.puffs.delete(i);
@@ -622,7 +676,7 @@ function updateStation(st, dt) {
     al.t = Math.min(1, al.t + dt / 0.6);
     const tx = st.pL + 26, ty = GY + 8, u = al.t;
     al.x = al.sx + (tx - al.sx) * u; al.y = al.sy + (ty - al.sy) * u - Math.sin(u * Math.PI) * 30;
-    if (al.t >= 1) sparks(al.x, al.y - 20, 6);
+    if (al.t >= 1) { sparks(al.x, al.y - 20, 6); audio.cry(al.kind); }
     return;
   }
   const hopping = st.waiting.some(p => p.state === 'hop');
@@ -634,7 +688,7 @@ function updateStation(st, dt) {
       S.tapQueue = Math.max(0, S.tapQueue - 1);
       if (S.riders.length >= 4) S.riders.shift();
       next.slot = S.riders.length; S.riders.push({ kind: next.kind, pending: true }); next.seat = S.riders[next.slot];
-      next.state = 'hop'; next.t = 0; next.sx = next.x; next.sy = next.y; st.nextT = 0.7; audio.hop();
+      next.state = 'hop'; next.t = 0; next.sx = next.x; next.sy = next.y; st.nextT = 0.7; audio.hop(); audio.cry(next.kind);
     }
   }
   for (const p of st.waiting) if (p.state === 'hop') {
@@ -947,7 +1001,9 @@ function onDown(e) {
       go('RUN');
       return;
     }
-    // 茂み・木・雲に触れたら、いないいないばあ(このタッチは、なぞり・踏切・駅には使わない)
+    // 動物(ごほうびの動物・窓の乗客)・踏切の車に触れたら、鳴いて跳ねる(このタッチは、なぞり・踏切・駅には使わない)
+    if (pokeCreature(w)) { ent.palm = true; return; }
+    // 茂み・木・雲に触れたら、いないいないばあ
     const onTrain = S.geom.some(g => Math.abs(w.x - g.cx) < g.def.len / 2 + 10 && w.y > g.cy - 78 && w.y < g.cy + 8);
     if (!onTrain && pokeScenery(w, e.clientX / S.s, e.clientY / S.s - S.oy)) { ent.palm = true; return; }
     if (S.state === 'GUIDE') S.idle = 0;
@@ -2171,7 +2227,8 @@ function drawAnimal(a) {
   const age = S.time - a.t0; if (age < 0) return;
   const sc = easeOutBack(clamp(age / 0.35, 0, 1));
   const c = ANIMAL_COL[a.kind];
-  ctx.save(); ctx.translate(a.x, a.y); ctx.scale(sc, sc);
+  const hop = a.hop ? Math.max(0, Math.sin(clamp((S.time - a.hop) / 0.35, 0, 1) * Math.PI)) * 14 : 0;
+  ctx.save(); ctx.translate(a.x, a.y - hop); ctx.scale(sc, sc);
   ctx.fillStyle = 'rgba(40,70,30,.18)'; ctx.beginPath(); ctx.ellipse(0, 1, 20, 4, 0, 0, 6.2832); ctx.fill();
   drawAnimalArm(c, age, true);
   spr(a.kind, 0, 0);
