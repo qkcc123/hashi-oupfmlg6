@@ -63,7 +63,10 @@ const config = {
   H: 360, minW: 480, GY: 250,
   vmax: 170, accel: 300, brake: 700, crossV: 85,
   gapPattern: [0.26, 0.44, 0.32, 0.5, 0.23, 0.38], riverDist: 900, stopGap: 70, finishOver: 26,
-  sceneOrder: ['river', 'river', 'crossing', 'river', 'station'],
+  sceneOrder: ['river', 'river', 'crossing', 'river', 'station', 'tunnel'],
+  // トンネルを出るたびに、時間帯と天気がこの順にかわる
+  periods: [{ night: false, w: 'sun' }, { night: true, w: 'clear' }, { night: false, w: 'rain' }, { night: true, w: 'clear' }, { night: false, w: 'snow' }, { night: true, w: 'snow' }],
+  tunnelLen: 330,
   maxArch: 80, archA: 26, shapeBlend: 0.45, maxSlope: 0.55,
   sampleStep: 8, plankEvery: 2,
   guideEmphAt: 6, autoAt: 14, drawStallAt: 5,
@@ -88,7 +91,8 @@ const S = {
   rivers: [], crossings: [], stations: [], upcoming: null, riders: [], tapQueue: 0, cur: null, bellT: 0, riverCount: 0,
   stroke: [], primary: null, active: new Map(), idle: 0, lastMove: 0, strokeDone: false,
   sceneNo: 0, fishT: 3, shake: 0, heartT: 0, drawDist: 0, jiggle: 0, sunSpin: 0, lastToot: -9, particles: [], animals: [], hopY: 0, wave: false, rw: {}, smokeT: 0, tickX: 0, geom: [], lastPon: 0,
-  peeks: new Map(), peekN: 0, birds: [], puffs: new Map()
+  peeks: new Map(), peekN: 0, birds: [], puffs: new Map(),
+  tunnels: [], period: 0, nightK: 0
 };
 
 /* ================= defs (拡張点) ================= */
@@ -129,9 +133,12 @@ const THEMES = [
 const rgb = a => 'rgb(' + (a[0] | 0) + ',' + (a[1] | 0) + ',' + (a[2] | 0) + ')';
 const th = JSON.parse(JSON.stringify(THEMES[0]));
 function lerpTheme(dt) {
-  const tgt = THEMES[Math.floor(S.sceneNo / config.sceneOrder.length) % THEMES.length], k = 1 - Math.exp(-dt * 0.35);
+  const tgt = THEMES[Math.floor(S.period / 2) % THEMES.length], k = 1 - Math.exp(-dt * 0.35);
   for (const key in th) for (let i = 0; i < 3; i++) th[key][i] += (tgt[key][i] - th[key][i]) * k;
+  // 昼⇔夜は、トンネルを出たところから約2秒でかわる
+  S.nightK += ((periodNow().night ? 1 : 0) - S.nightK) * (1 - Math.exp(-dt * 1.6));
 }
+function periodNow() { return config.periods[S.period % config.periods.length]; }
 
 /* ================= audio ================= */
 const audio = {
@@ -180,13 +187,13 @@ const audio = {
     src.connect(f); f.connect(g); g.connect(this.master);
     src.start(t); src.stop(t + dur + 0.03);
   },
-  blast(delay, dur) {
+  blast(delay, dur, vol) {
     const c = this.ctx; if (!c || this.muted) return;
-    const t = c.currentTime + delay;
+    const t = c.currentTime + delay, gv = vol || 0.22;
     const g = c.createGain();
     g.gain.setValueAtTime(0.0001, t);
-    g.gain.linearRampToValueAtTime(0.22, t + 0.05);
-    g.gain.setValueAtTime(0.22, t + dur - 0.1);
+    g.gain.linearRampToValueAtTime(gv, t + 0.05);
+    g.gain.setValueAtTime(gv, t + dur - 0.1);
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
     g.connect(this.master);
     const lfo = c.createOscillator(), lg = c.createGain();
@@ -220,6 +227,9 @@ const audio = {
   bell() { this.tone(880, { dur: 0.16, type: 'triangle', gain: 0.2 }); this.tone(1320, { dur: 0.08, gain: 0.06 }); },
   honk() { this.tone(440, { dur: 0.12, type: 'square', gain: 0.09 }); this.tone(554, { dur: 0.12, type: 'square', gain: 0.06 });
     this.tone(440, { dur: 0.16, type: 'square', gain: 0.09, delay: 0.18 }); this.tone(554, { dur: 0.16, type: 'square', gain: 0.06, delay: 0.18 }); },
+  // トンネルの中: ゴーという低い音 / こだまする汽笛
+  rumble() { this.noise(2.2, 0.1, 160); this.noise(1.4, 0.05, 320); },
+  echoToot() { this.blast(0, 0.3); this.blast(0.38, 0.3, 0.09); this.blast(0.76, 0.3, 0.04); },
   // ぽわっ(雲)
   puff() { this.tone(260, { dur: 0.25, type: 'sine', gain: 0.16, slide: 1.6 }); this.noise(0.25, 0.05, 900); },
   cry(kind) { this.pop(); },
@@ -316,12 +326,32 @@ function makeStation(afterX) {
     alighter: { kind: ANIMALS[(Math.random() * ANIMALS.length) | 0], x: 0, y: 0, t: -1 }, nextT: 0
   };
 }
+// トンネル: L が入口、R が出口。電車は止まらずに通りぬける
+function makeTunnel(afterX) {
+  const L = afterX + config.riverDist + rand(0, 160);
+  return { kind: 'tunnel', L, R: L + config.tunnelLen, hid: false, out: false };
+}
 // 場面を1つ作って、描画用のリストに入れる
 function makeScene(no, afterX) {
   const kind = config.sceneOrder[no % config.sceneOrder.length];
-  const s = kind === 'crossing' ? makeCrossing(afterX) : kind === 'station' ? makeStation(afterX) : makeRiver(afterX);
-  (kind === 'crossing' ? S.crossings : kind === 'station' ? S.stations : S.rivers).push(s);
+  const s = kind === 'crossing' ? makeCrossing(afterX) : kind === 'station' ? makeStation(afterX) : kind === 'tunnel' ? makeTunnel(afterX) : makeRiver(afterX);
+  (kind === 'crossing' ? S.crossings : kind === 'station' ? S.stations : kind === 'tunnel' ? S.tunnels : S.rivers).push(s);
   return s;
+}
+function inTunnel(x) { return S.tunnels.some(t => x > t.L && x < t.R); }
+// 電車がまるごとトンネルの中に隠れているか
+function trainHidden() {
+  return S.tunnels.some(t => S.trainX < t.R && S.trainX - TRAIN_LEN > t.L);
+}
+// トンネル: 少しゆっくり通りぬける。隠れたらゴーという音、出口に着いたら時間帯がかわる
+function updateTunnel(t, dt) {
+  moveTrain(dt, config.vmax * 0.7);
+  if (!t.hid && S.trainX - TRAIN_LEN > t.L + 4) { t.hid = true; audio.rumble(); }
+  if (!t.out && S.trainX >= t.R - 2) {
+    t.out = true; S.period++; audio.chime();
+    for (let i = 0; i < 3; i++) stars(t.R + 10, GY - 40 - i * 12, 4);
+  }
+  if (S.trainX - TRAIN_LEN > t.R + 40) nextScene();
 }
 // 次の場面は1つ先まで前もって置いておく(画面に入ってから突然あらわれないように)。
 // 通りすぎて画面の外へ出たものだけ片づける
@@ -333,6 +363,7 @@ function nextScene() {
   S.rivers = S.rivers.filter(s => !gone(s));
   S.crossings = S.crossings.filter(s => !gone(s));
   S.stations = S.stations.filter(s => !gone(s));
+  S.tunnels = S.tunnels.filter(s => !gone(s));
   S.animals = S.animals.filter(a => a.x > S.camX - 200);
   go('RUN');
 }
@@ -580,6 +611,7 @@ function update(dt) {
   const cur = S.cur;
   switch (S.state) {
     case 'RUN': {
+      if (cur.kind === 'tunnel') { updateTunnel(cur, dt); break; }
       // 川の手前で少し離れて止まる(なぞり始める左岸を電車がふさがないように)
       const stopAt = cur.L - config.stopGap, dist = stopAt - S.trainX;
       moveTrain(dt, Math.min(config.vmax, 8 + dist * 1.6));
@@ -698,7 +730,7 @@ function update(dt) {
   S.geom = trainGeom();
   const e = S.geom[0];
   S.smokeT -= dt;
-  if (S.smokeT <= 0 && e && S.state !== 'STOP') { smoke(e.chim.x, e.chim.y); S.smokeT = S.vel > 5 ? 0.1 : 0.35; }
+  if (S.smokeT <= 0 && e && S.state !== 'STOP' && !trainHidden()) { smoke(e.chim.x, e.chim.y); S.smokeT = S.vel > 5 ? 0.1 : 0.35; }
 
   let target;
   // 場面が切りかわったフレームでも新しい場面を見る(更新の最初に読んだ cur は古い場面のことがある)
@@ -778,8 +810,10 @@ function onDown(e) {
     if (S.state === 'GUIDE' && S.cur.kind === 'station') S.tapQueue = Math.min(3, S.tapQueue + 1);
     // 電車をタッチ → ぽっ(汽笛)とぷるん
     if (S.state !== 'GUIDE' && S.state !== 'DRAW' && S.geom.some(g => Math.abs(w.x - g.cx) < g.def.len / 2 + 10 && w.y > g.cy - 78 && w.y < g.cy + 8) && S.time - S.lastToot > 0.6) {
-      S.lastToot = S.time; S.jiggle = 0.4; audio.toot();
-      const eng = S.geom[0]; if (eng) for (let i = 0; i < 3; i++) smoke(eng.chim.x, eng.chim.y, true);
+      S.lastToot = S.time; S.jiggle = 0.4;
+      // トンネルの中にいるときは、汽笛がこだまする
+      if (trainHidden()) { audio.echoToot(); const t = S.tunnels.find(t => S.trainX > t.L && S.trainX - TRAIN_LEN < t.R); if (t) stars((t.L + t.R) / 2, GY - 120, 6); }
+      else { audio.toot(); const eng = S.geom[0]; if (eng) for (let i = 0; i < 3; i++) smoke(eng.chim.x, eng.chim.y, true); }
     }
     // 太陽をタッチ → くるっと回ってきらきら
     const lx = e.clientX / S.s, ly = e.clientY / S.s - S.oy;
@@ -1175,6 +1209,9 @@ function drawSky() {
   sg.addColorStop(0, 'rgba(255,250,220,.8)'); sg.addColorStop(1, 'rgba(255,250,220,0)');
   ctx.fillStyle = sg; ctx.fillRect(sx - 100, sy - 100, 200, 200);
   const spin = S.time * 0.25 + (1 - Math.pow(S.sunSpin, 2)) * (S.sunSpin > 0 ? 6.2832 : 0);
+  // 夜は太陽が沈む(月にかわる)
+  if (S.nightK > 0.98) return;
+  ctx.save(); ctx.globalAlpha = 1 - S.nightK;
   ctx.save(); ctx.translate(sx, sy); ctx.rotate(spin);
   if (!spr('sunRays', 0, 0)) {
     ctx.strokeStyle = rgb(th.sun); ctx.lineWidth = 5;
@@ -1182,10 +1219,12 @@ function drawSky() {
   }
   ctx.restore();
   if (!spr('sunFace', sx, sy)) circ(sx, sy, 28, rgb(th.sun));
+  ctx.restore();
 }
 function sunPos() { return { x: S.W * 0.82 - S.camX * 0.02, y: 62 + Math.sin(S.time * 0.4) * 2 }; }
 function drawBirds() {
-  ctx.strokeStyle = 'rgba(80,96,130,.75)'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+  if (S.nightK > 0.9) return;
+  ctx.strokeStyle = 'rgba(80,96,130,' + (0.75 * (1 - S.nightK)).toFixed(2) + ')'; ctx.lineWidth = 2; ctx.lineCap = 'round';
   for (let i = 0; i < 3; i++) {
     const x = ((S.time * (22 + i * 5) + i * 230) % (S.W + 140)) - 70, y = 55 + i * 26 + Math.sin(S.time * 1.7 + i) * 6;
     const f = Math.sin(S.time * 9 + i * 2) * 5;
@@ -1230,6 +1269,7 @@ function drawHills(par, base, amp, freq, col) {
 function inGap(x, margin) {
   for (const r of S.rivers) if (x > r.L - margin && x < r.R + margin) return true;
   for (const c of S.crossings) if (x > c.L - 40 - margin && x < c.R + 40 + margin) return true;
+  for (const t of S.tunnels) if (x > t.L - 120 - margin && x < t.R + 120 + margin) return true;
   return false;
 }
 // 130px ごとの区画 i にある茂みと木(描画とタッチ判定で同じものを使う)
@@ -1573,6 +1613,121 @@ function drawRider(kind, x, y, sc, wave, i) {
   ctx.restore();
 }
 
+/* ================= render: tunnel / night ================= */
+// 山とトンネル。front=false は電車より奥(山全体と入口の暗がり)、front=true は電車より手前(入口〜出口の間だけ)
+function drawMountain(t, front) {
+  const cx = (t.L + t.R) / 2, a = t.L - 120, b = t.R + 120, top = GY - 150;
+  ctx.save();
+  if (front) { ctx.beginPath(); ctx.rect(t.L, -400, t.R - t.L, GY + 9 + 400); ctx.clip(); }
+  ctx.beginPath(); ctx.moveTo(a, GY + 8);
+  ctx.bezierCurveTo(a + 60, GY - 40, cx - 150, top + 6, cx - 40, top + 2);
+  ctx.quadraticCurveTo(cx, top - 14, cx + 46, top + 4);
+  ctx.bezierCurveTo(cx + 150, top + 10, b - 60, GY - 40, b, GY + 8); ctx.closePath();
+  const g = ctx.createLinearGradient(0, top, 0, GY + 8);
+  g.addColorStop(0, '#9fd27a'); g.addColorStop(0.5, '#6db35a'); g.addColorStop(1, '#4f9447');
+  ctx.fillStyle = g; ctx.fill(); ctx.strokeStyle = 'rgba(40,90,40,.5)'; ctx.lineWidth = 1.6; ctx.stroke();
+  // 水彩のにじみと、山の茂み
+  ctx.fillStyle = 'rgba(255,255,230,.18)'; ctx.beginPath(); ctx.ellipse(cx - 40, top + 40, 80, 26, -0.2, 0, 6.2832); ctx.fill();
+  for (let k = 0; k < 7; k++) {
+    const x = a + 70 + hash(k + t.L * 0.01) * (b - a - 140), y = GY - 20 - hash(k * 7 + 3) * 90;
+    if (Math.abs(x - t.L) < 50 || Math.abs(x - t.R) < 50) continue;
+    ell(x, y, 13, 9, 'rgba(70,140,60,.55)', null); ell(x - 3, y - 3, 6, 3.5, 'rgba(255,255,255,.18)', null);
+  }
+  for (const x of [t.L, t.R]) portal(x, front);
+  ctx.restore();
+}
+function portal(x, front) {
+  const r = 32, base = GY + 8, ty = GY - 60;
+  const arch = () => { ctx.beginPath(); ctx.moveTo(x - r, base); ctx.lineTo(x - r, ty); ctx.arc(x, ty, r, Math.PI, 0); ctx.lineTo(x + r, base); };
+  arch(); ctx.closePath();
+  const g = ctx.createLinearGradient(0, ty - r, 0, base); g.addColorStop(0, '#2c2534'); g.addColorStop(1, '#1d1824');
+  ctx.fillStyle = g; ctx.fill();
+  if (!front) return;
+  // 石の縁(手前に描くので、電車が縁の後ろへ入っていくように見える)
+  arch(); ctx.strokeStyle = 'rgba(60,54,70,.7)'; ctx.lineWidth = 12; ctx.stroke();
+  arch(); ctx.strokeStyle = '#b3abbd'; ctx.lineWidth = 9; ctx.stroke();
+  ctx.strokeStyle = 'rgba(80,72,92,.55)'; ctx.lineWidth = 1.2;
+  for (let k = 0; k <= 8; k++) {
+    const an = Math.PI + k / 8 * Math.PI, c = Math.cos(an), s = Math.sin(an);
+    ctx.beginPath(); ctx.moveTo(x + c * (r - 4.5), ty + s * (r - 4.5)); ctx.lineTo(x + c * (r + 4.5), ty + s * (r + 4.5)); ctx.stroke();
+  }
+  for (const sx of [-r, r]) for (let y = ty + 16; y < base; y += 16) { ctx.beginPath(); ctx.moveTo(x + sx - 4.5, y); ctx.lineTo(x + sx + 4.5, y); ctx.stroke(); }
+}
+// 夜: 画面全体を青く暗くしてから、明かり(ライト・窓・ランプ・ほたる・月・星)を重ねる
+function drawNight(xs, xe) {
+  const k = S.nightK;
+  ctx.save();
+  ctx.setTransform(S.dpr * S.s, 0, 0, S.dpr * S.s, 0, S.dpr * S.s * S.oy);
+  const g = ctx.createLinearGradient(0, 0, 0, config.H);
+  g.addColorStop(0, rgb(mixC([255, 255, 255], [118, 128, 200], k))); g.addColorStop(1, rgb(mixC([255, 255, 255], [96, 104, 170], k)));
+  ctx.globalCompositeOperation = 'multiply'; ctx.fillStyle = g; ctx.fillRect(0, -S.oy, S.W, config.H + S.oy);
+  ctx.globalCompositeOperation = 'source-over';
+  // 星(山や木より上の、空の高いところだけ)
+  for (let i = 0; i < 26; i++) {
+    const x = hash(i + 300) * S.W, y = -S.oy * 0.6 + 8 + hash(i + 400) * (88 + S.oy * 0.6), tw = 0.55 + 0.45 * Math.sin(S.time * (1.5 + hash(i) * 2) + i);
+    ctx.globalAlpha = k * tw; ctx.save(); ctx.translate(x, y); ctx.rotate(i);
+    if (i % 4 === 0) { starPath(3.6); fs('#fff6c8', null); } else circ(0, 0, 1.4, '#fffbe8');
+    ctx.restore();
+  }
+  // 月(にっこり)
+  const m = sunPos();
+  ctx.globalAlpha = k;
+  const mg = ctx.createRadialGradient(m.x, m.y, 10, m.x, m.y, 70); mg.addColorStop(0, 'rgba(255,248,200,.45)'); mg.addColorStop(1, 'rgba(255,248,200,0)');
+  ctx.fillStyle = mg; ctx.fillRect(m.x - 70, m.y - 70, 140, 140);
+  // まるいお月さま(にっこり顔)
+  const mf = ctx.createRadialGradient(m.x - 7, m.y - 8, 3, m.x, m.y, 25); mf.addColorStop(0, '#fffbe0'); mf.addColorStop(1, '#ffe48a');
+  circ(m.x, m.y, 24, mf, 'rgba(210,170,70,.6)', 1.4);
+  circ(m.x + 9, m.y - 10, 4, 'rgba(230,200,110,.45)'); circ(m.x - 12, m.y - 12, 2.6, 'rgba(230,200,110,.45)');
+  ctx.strokeStyle = '#8a6a30'; ctx.lineWidth = 1.8; ctx.lineCap = 'round';
+  for (const ex of [-8, 8]) { ctx.beginPath(); ctx.arc(m.x + ex, m.y - 1, 3.4, Math.PI * 1.15, Math.PI * 1.85); ctx.stroke(); }
+  ctx.beginPath(); ctx.arc(m.x, m.y + 5, 5, 0.35, Math.PI - 0.35); ctx.stroke();
+  circ(m.x - 13, m.y + 5, 3, 'rgba(255,150,130,.45)'); circ(m.x + 13, m.y + 5, 3, 'rgba(255,150,130,.45)');
+  ctx.restore();
+  // 明かり(加算で光らせる)
+  ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = k;
+  {
+    for (const g2 of S.geom) {
+      if (inTunnel(g2.cx + (g2.def.engine ? 20 : 0))) continue;
+      ctx.save(); ctx.translate(g2.cx, g2.cy); ctx.rotate(g2.ang);
+      if (g2.def.engine) {
+        // 前を照らすライト
+        const lg2 = ctx.createLinearGradient(38, 0, 150, 0); lg2.addColorStop(0, 'rgba(255,240,170,.42)'); lg2.addColorStop(1, 'rgba(255,240,170,0)');
+        ctx.fillStyle = lg2; ctx.beginPath(); ctx.moveTo(38, -36); ctx.lineTo(150, -64); ctx.lineTo(150, 6); ctx.lineTo(38, -30); ctx.closePath(); ctx.fill();
+        circ(38.5, -34, 7, 'rgba(255,250,200,.6)');
+        rr(-28.5, -50, 18, 16, 5); ctx.fillStyle = 'rgba(255,200,110,.35)'; ctx.fill();
+      } else {
+        for (const wx of [-20, 4]) { rr(wx, -34, 16, 15, 4.5); ctx.fillStyle = 'rgba(255,200,110,.4)'; ctx.fill(); }
+        const wg = ctx.createRadialGradient(0, -26, 4, 0, -26, 34); wg.addColorStop(0, 'rgba(255,190,100,.22)'); wg.addColorStop(1, 'rgba(255,190,100,0)');
+        ctx.fillStyle = wg; ctx.fillRect(-34, -60, 68, 68);
+      }
+      ctx.restore();
+    }
+  }
+  // 踏切のランプ・駅の明かり
+  for (const c of S.crossings) if (c.R + 60 > xs && c.L - 60 < xe && (c.gate > 0.02 || (c === S.cur && (S.state === 'GATE' || S.state === 'PASS')))) {
+    const on = Math.floor(S.time * 2.9) % 2;
+    for (const [x, y, sc] of [[c.L - 14, GY + 44, 1], [c.R + 14, GY + 2, 0.62]]) {
+      const lx = x + (on ? 10 : -10) * sc, ly = y - 44 * sc, rg2 = ctx.createRadialGradient(lx, ly, 1, lx, ly, 30 * sc);
+      rg2.addColorStop(0, 'rgba(255,90,60,.8)'); rg2.addColorStop(1, 'rgba(255,90,60,0)'); ctx.fillStyle = rg2; ctx.fillRect(lx - 30, ly - 30, 60, 60);
+    }
+  }
+  for (const st of S.stations) if (st.pR + 30 > xs && st.pL - 30 < xe) {
+    for (const x of [st.pL + 40, st.pR - 40]) {
+      const ly = GY - 88, rg2 = ctx.createRadialGradient(x, ly, 2, x, ly, 30);
+      rg2.addColorStop(0, 'rgba(255,220,140,.55)'); rg2.addColorStop(1, 'rgba(255,220,140,0)'); ctx.fillStyle = rg2; ctx.fillRect(x - 30, ly - 30, 60, 60);
+      circ(x, ly, 3.4, 'rgba(255,240,190,.9)');
+    }
+  }
+  // 川のほたる
+  for (const r of S.rivers) if (r.R > xs && r.L < xe) for (let i = 0; i < 5; i++) {
+    const x = r.L + 10 + ((hash(i + r.L) * (r.R - r.L - 20) + Math.sin(S.time * 0.7 + i * 2) * 18)), y = GY + 18 + hash(i * 5 + r.L) * 40 + Math.sin(S.time * 1.3 + i) * 8;
+    const bl = 0.5 + 0.5 * Math.sin(S.time * 3 + i * 1.7);
+    const fg = ctx.createRadialGradient(x, y, 0.5, x, y, 9); fg.addColorStop(0, 'rgba(230,255,140,' + (0.9 * bl).toFixed(2) + ')'); fg.addColorStop(1, 'rgba(230,255,140,0)');
+    ctx.fillStyle = fg; ctx.fillRect(x - 9, y - 9, 18, 18);
+  }
+  ctx.restore();
+}
+
 /* ================= render: crossing ================= */
 function drawCrossingBack(c) {
   // 線路の向こう側へ続く道
@@ -1867,15 +2022,18 @@ function render() {
   drawFlowers(xs, xe);
   for (const c of S.crossings) if (c.R + 60 > xs && c.L - 60 < xe) drawCrossingBack(c);
   for (const st of S.stations) if (st.pR + 30 > xs && st.pL - 30 < xe) drawStationBack(st);
+  for (const t of S.tunnels) if (t.R + 140 > xs && t.L - 140 < xe) drawMountain(t, false);
   for (const r of S.rivers) if (r.R > xs && r.L < xe) drawBridge(r);
-  for (const g of S.geom) if (g.cy + S.hopY > GY - 3 && g.cy + S.hopY < GY + 3) {
+  for (const g of S.geom) if (g.cy + S.hopY > GY - 3 && g.cy + S.hopY < GY + 3 && !inTunnel(g.cx)) {
     ctx.fillStyle = 'rgba(0,0,0,' + (0.2 - S.hopY * 0.006) + ')'; ctx.beginPath(); ctx.ellipse(g.cx, GY + 11, g.def.len / 2 - 2, 4, 0, 0, 6.2832); ctx.fill();
   }
   S.geom.slice().reverse().forEach(drawCar);
+  for (const t of S.tunnels) if (t.R + 140 > xs && t.L - 140 < xe) drawMountain(t, true);
   for (const c of S.crossings) if (c.R + 60 > xs && c.L - 60 < xe) drawCrossingFront(c);
   for (const st of S.stations) if (st.pR + 30 > xs && st.pL - 30 < xe) drawStationFront(st);
   for (const a of S.animals) drawAnimal(a);
   drawBirdsFlying();
+  if (S.nightK > 0.01) drawNight(xs, xe);
   drawParticles();
   drawStroke();
   drawGuide();
@@ -1933,7 +2091,7 @@ S.camX = S.trainX - 0.32 * S.W;
 S.geom = trainGeom();
 // 絵の準備ができてから始める(読み込みに失敗した絵は簡易描画で代用。最長2秒で開始)
 Promise.race([loadSprites(), new Promise(r => setTimeout(r, 2000))]).then(() => requestAnimationFrame(frame));
-if (/[?&]debug\b/.test(location.search)) window.__nz = { S, makeBridge, sag, config, SPR, ctx, drawAnimal, drawRider, drawCar, drawSky, sunPos, scenery, cloudList, audio };
+if (/[?&]debug\b/.test(location.search)) window.__nz = { S, makeBridge, sag, config, SPR, ctx, drawAnimal, drawRider, drawCar, drawSky, sunPos, scenery, cloudList, audio, trainHidden };
 })();
 </script>
 </body>
