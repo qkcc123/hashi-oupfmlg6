@@ -108,7 +108,7 @@ const S = {
   peeks: new Map(), peekN: 0, birds: [], puffs: new Map(),
   tunnels: [], period: 0, nightK: 0,
   homes: [], playT: 0, sleepMin: 0, sleepDue: false, zT: 0, veh: 0,
-  periodStart: 0, rainK: 0, snowK: 0, bowK: 0, patterT: 0
+  periodStart: 0, rainK: 0, snowK: 0, bowK: 0, patterT: 0, lead: 0.32
 };
 try { S.sleepMin = [0, 5, 10, 15, 20].indexOf(+localStorage.getItem('nazotte.sleepMin')) > 0 ? +localStorage.getItem('nazotte.sleepMin') : 0; } catch (e) {}
 
@@ -706,13 +706,18 @@ function sceneCenter(c) { return c.pL !== undefined ? (c.pL + c.pR) / 2 - S.W / 
 // 電車が止まる前に止まる位置のカメラ(sceneCenter)に着いて静止する
 // 汽車の最後尾が画面に入っている限界のカメラ位置(これより右へは行かない=汽車を置いていかない)
 function trainKeep() { return S.trainX - TRAIN_LEN - 16; }
-function runTarget(c) {
+function runTarget(c, dt) {
   // 止まる位置が近づくと、カメラは次の川(踏切・駅)のほうへ少しずつ先回りする。
   // ただし汽車の最後尾が画面から出ない範囲まで(汽車を置いていかない)
   const dist = c.L - config.stopGap - S.trainX, k = clamp((1100 - dist) / 600, 0, 1);
   const ramp = S.state === 'RUN' ? clamp(S.stateT / 1.6, 0, 1) : 1;
   const e = k * k * (3 - 2 * k) * ramp * ramp * (3 - 2 * ramp);
-  const want = (S.trainX - 0.32 * S.W) * (1 - e) + sceneCenter(c) * e;
+  // 電車を追うときの位置(画面の左から何割か)。トンネルを出た直後は右寄りから、ゆっくりふだんの0.32へ戻す
+  if (c.kind === 'tunnel' && S.trainX > c.L) S.lead = clamp((S.trainX - S.camX) / S.W, 0.32, 0.68);
+  else S.lead += (0.32 - S.lead) * (1 - Math.exp(-(dt || 0) * 1.5));
+  let want = (S.trainX - S.lead * S.W) * (1 - e) + sceneCenter(c) * e;
+  // トンネルを出てきた電車は、画面の右外へ出ないように追いかける
+  if (c.kind === 'tunnel') want = Math.max(want, S.trainX - 0.68 * S.W);
   return Math.min(want, trainKeep());
 }
 function adoptPointer() {
@@ -933,7 +938,7 @@ function update(dt) {
     target = need > S.camX ? Math.max(S.camX, Math.min(need, cc.kind === 'station' ? need : trainKeep())) : S.camX;
   }
   // 走行中は電車を追い、川(踏切・駅)の位置まで来たらそこで止まって、電車が画面に入ってきて止まる
-  else if (S.state === 'RUN') target = runTarget(cc);
+  else if (S.state === 'RUN') target = runTarget(cc, dt);
   else if (S.state === 'READY') target = S.trainX - 0.32 * S.W;
   else if (S.state === 'REWARD' && cc.kind === 'crossing') {
     // 車が踏切を渡り終えるまでは踏切を画面に残し、そのあと電車にゆっくり追いつく
