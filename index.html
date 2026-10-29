@@ -107,7 +107,7 @@ const S = {
   sceneNo: 0, fishT: 3, shake: 0, heartT: 0, drawDist: 0, jiggle: 0, sunSpin: 0, lastToot: -9, particles: [], animals: [], hopY: 0, wave: false, rw: {}, smokeT: 0, tickX: 0, geom: [], lastPon: 0,
   peeks: new Map(), peekN: 0, birds: [], puffs: new Map(),
   tunnels: [], period: 0, nightK: 0,
-  homes: [], playT: 0, sleepMin: 0, sleepDue: false, zT: 0
+  homes: [], playT: 0, sleepMin: 0, sleepDue: false, zT: 0, veh: 0
 };
 try { S.sleepMin = [0, 5, 10, 15, 20].indexOf(+localStorage.getItem('nazotte.sleepMin')) > 0 ? +localStorage.getItem('nazotte.sleepMin') : 0; } catch (e) {}
 
@@ -138,6 +138,14 @@ const defs = {
   }
 };
 const VEH = defs.vehicles.train;
+// 乗り物の見た目と音(車両の長さ・窓の位置はどれも同じ。トンネルの中で順にかわる)
+const STYLES = {
+  train: { engine: 'engine', cars: ['carBlue', 'carYellow'], eye: { x: 28.3, y: -30, cx: 26.5 }, chim: { x: 18, y: -60 }, smoke: 1, rod: true, light: { x: 38.5, y: -34 }, cab: [-28.5, -50, 18, 16], horn: 'train' },
+  shinkansen: { engine: 'engineShin', cars: ['carShin', 'carShin'], eye: { x: 35.6, y: -31, cx: 34 }, chim: { x: 10, y: -56 }, smoke: 0, rod: false, light: { x: 45.5, y: -16 }, cab: null, horn: 'shin' },
+  sl: { engine: 'engineSL', cars: ['carGreen', 'carGreen'], eye: { x: 32.8, y: -31, cx: 31 }, chim: { x: 25, y: -72 }, smoke: 2, rod: true, wheel: true, light: { x: 41, y: -51 }, cab: [-30, -54, 17, 15], horn: 'sl' }
+};
+const STYLE_ORDER = ['train', 'shinkansen', 'sl'];
+function styleNow() { return STYLES[STYLE_ORDER[S.veh % STYLE_ORDER.length]]; }
 const TRAIN_LEN = VEH.cars.reduce((a, c) => a + c.len, 0) + VEH.gap * (VEH.cars.length - 1);
 
 /* ================= theme (場面ごとの空の色。川1種類のまま雰囲気だけ変える) ================= */
@@ -222,7 +230,26 @@ const audio = {
     });
     lfo.start(t); lfo.stop(t + dur + 0.05);
   },
-  whistle() { this.blast(0, 0.28); this.blast(0.35, 0.8); },
+  // 汽笛は乗り物ごとにちがう音(赤い電車=ピー、新幹線=ファーン、蒸気機関車=ポッポー)
+  whistle() {
+    const h = styleNow().horn;
+    if (h === 'shin') { this.shin(0, 0.5); this.shin(0.55, 1.0); }
+    else if (h === 'sl') { this.steam(0, 0.25); this.steam(0.3, 0.25); this.steam(0.62, 0.9); }
+    else { this.blast(0, 0.28); this.blast(0.35, 0.8); }
+  },
+  shin(delay, dur) {
+    [[587.3, 0.1], [740, 0.08], [880, 0.05]].forEach(([f, g]) => {
+      this.tone(f, { dur, gain: g, delay, type: 'sine' });
+      this.tone(f * 2, { dur: dur * 0.7, gain: g * 0.25, delay, type: 'triangle' });
+    });
+  },
+  steam(delay, dur) {
+    this.blast(delay, dur, 0.15);
+    const c = this.ctx; if (!c || this.muted) return;
+    setTimeout(() => this.noise(dur, 0.12, 2400), delay * 1000);
+  },
+  // 蒸気機関車が走るときのシュッ
+  chuff() { this.noise(0.12, 0.07, 1200); },
   plank(i, type) { const n = [523.25, 587.33, 659.25, 784, 880, 1046.5, 1174.7, 1318.5, 1568][Math.min(i, 8)];
     if (type === 'iron') { this.tone(n * 2, { dur: 0.09, type: 'square', gain: 0.06 }); this.tone(n * 3.01, { dur: 0.35, gain: 0.09 }); this.tone(n * 4.2, { dur: 0.2, gain: 0.04 }); return; }
     if (type === 'rope') { this.tone(n / 2, { dur: 0.42, type: 'triangle', gain: 0.3 }); this.tone(n, { dur: 0.2, gain: 0.08 }); return; }
@@ -239,7 +266,10 @@ const audio = {
   },
   // なぞっている間、右へ進むほど音が上がる
   drawNote(p) { this.tone(392 * Math.pow(2, p * 1.2), { dur: 0.09, type: 'sine', gain: 0.12 }); },
-  toot() { this.blast(0, 0.22); },
+  toot() {
+    const h = styleNow().horn;
+    if (h === 'shin') this.shin(0, 0.35); else if (h === 'sl') this.steam(0, 0.3); else this.blast(0, 0.22);
+  },
   // おやすみのオルゴール(きらきら星のはじめの部分)
   lullaby() {
     const C = 1046.5, D = 1174.7, E = 1318.5, F = 1396.9, G = 1568, A = 1760;
@@ -254,7 +284,7 @@ const audio = {
     this.tone(440, { dur: 0.16, type: 'square', gain: 0.09, delay: 0.18 }); this.tone(554, { dur: 0.16, type: 'square', gain: 0.06, delay: 0.18 }); },
   // トンネルの中: ゴーという低い音 / こだまする汽笛
   rumble() { this.noise(2.2, 0.1, 160); this.noise(1.4, 0.05, 320); },
-  echoToot() { this.blast(0, 0.3); this.blast(0.38, 0.3, 0.09); this.blast(0.76, 0.3, 0.04); },
+  echoToot() { this.toot(); this.blast(0.38, 0.3, 0.09); this.blast(0.76, 0.3, 0.04); },
   // ぽわっ(雲)
   puff() { this.tone(260, { dur: 0.25, type: 'sine', gain: 0.16, slide: 1.6 }); this.noise(0.25, 0.05, 900); },
   cry(kind) { this.pop(); },
@@ -378,7 +408,8 @@ function trainHidden() {
 // トンネル: 少しゆっくり通りぬける。隠れたらゴーという音、出口に着いたら時間帯がかわる
 function updateTunnel(t, dt) {
   moveTrain(dt, config.vmax * 0.7);
-  if (!t.hid && S.trainX - TRAIN_LEN > t.L + 4) { t.hid = true; audio.rumble(); }
+  // まるごと隠れたら、ゴーという音。中で乗り物が入れかわる(出てくるときは別の乗り物)
+  if (!t.hid && S.trainX - TRAIN_LEN > t.L + 4) { t.hid = true; S.veh++; audio.rumble(); }
   if (!t.out && S.trainX >= t.R - 2) {
     t.out = true; S.period++; audio.chime();
     for (let i = 0; i < 3; i++) stars(t.R + 10, GY - 40 - i * 12, 4);
@@ -421,6 +452,9 @@ function stars(x, y, n) {
   }
 }
 function smoke(x, y, big) {
+  const st = styleNow();
+  if (!st.smoke) return;
+  if (st.smoke > 1) big = true;
   addP({ type: 'smoke', x, y, vx: rand(-8, 8) - S.vel * 0.15, vy: rand(-34, -22), g: -4, life: rand(0.9, 1.4), max: 1.4, size: big ? rand(7, 11) : rand(4, 6), color: '#ffffff' });
 }
 function confetti() {
@@ -624,6 +658,7 @@ function moveTrain(dt, target) {
   S.tickX += S.vel * dt;
   if (S.tickX > 60) {
     S.tickX = 0;
+    if (styleNow().smoke > 1) audio.chuff();
     const wx = S.trainX - 30;
     audio.gatan(S.rivers.some(r => r.bridge && wx > r.L && wx < r.R));
   }
@@ -636,7 +671,7 @@ function trainGeom() {
     const ang = Math.atan2(yR - yL, 2 * c.hb), cy = (yL + yR) / 2 - S.hopY;
     const g = { cx, cy, ang, def: c };
     if (c.engine) {
-      const lx = 18, ly = -60;
+      const ch = styleNow().chim, lx = ch.x, ly = ch.y;
       g.chim = { x: cx + lx * Math.cos(ang) - ly * Math.sin(ang), y: cy + lx * Math.sin(ang) + ly * Math.cos(ang) };
     }
     out.push(g);
@@ -1149,6 +1184,51 @@ const SPRITE_DEFS = {
   },
   carBlue: carBody('#7cc0ef', '#3f87c8', '#24598f', '#2f6aa6'),
   carYellow: carBody('#ffdb6e', '#e5a82a', '#a8741a', '#d0882a'),
+  carShin: carBody('#ffffff', '#dfe6f0', '#7f8aa3', '#3a6fd0'),
+  carGreen: carBody('#7ccb94', '#3f8a5e', '#2a5e40', '#7a4a32'),
+  // 新幹線: 白い車体に青い線、長い鼻
+  engineShin: {
+    x: -42, y: -64, w: 94, h: 70, seed: 5,
+    defs: lg('sb', '#ffffff', '#f2f5fa', '#d3dbe8') + lg('ws', '#5d86c8', '#22365e') + lg('gl', '#fbfeff', '#c4e6f8'),
+    body:
+      '<path d="M-34,-15 H38 Q41,-15 41,-12 V-7 Q41,-4 38,-4 H-34 Q-37,-4 -37,-7 V-12 Q-37,-15 -34,-15Z" fill="#5d6274" stroke="#2a2535" ' + LN + '/>' +
+      '<path d="M-37,-13 V-46 Q-37,-54 -29,-54 H4 C22,-54 38,-44 47,-24 Q50,-13 41,-13 Z" fill="url(#sb)" stroke="#7f8aa3" ' + LN + '/>' +
+      '<path d="M-37,-26 H45.6 Q46.6,-23 46.2,-20.5 H-37Z" fill="#3a6fd0"/>' +
+      '<path d="M-37,-19 H46 Q45,-16 43,-14 H-37Z" fill="#9db7e6" opacity=".55"/>' +
+      '<path d="M6,-51 C20,-50 31,-43 37,-35 H28 Q21,-45 6,-45.5Z" fill="url(#ws)" stroke="#2a3f6a" ' + LN + '/>' +
+      '<path d="M10,-49 C18,-48.5 24,-45 28,-41" stroke="#fff" stroke-opacity=".55" stroke-width="1.6" fill="none" stroke-linecap="round"/>' +
+      '<rect x="-31" y="-46" width="11" height="9" rx="3" fill="url(#gl)" stroke="#7f8aa3" ' + LN + '/><rect x="-16" y="-46" width="11" height="9" rx="3" fill="url(#gl)" stroke="#7f8aa3" ' + LN + '/>' +
+      '<path d="M-1,-50 V-28" stroke="#9aa6bd" stroke-width="1.2"/>' +
+      '<ellipse cx="34" cy="-31" rx="5" ry="5.6" fill="#fff" stroke="#5a6a8a" ' + LN + '/>' +
+      '<ellipse cx="38" cy="-16.8" rx="3.4" ry="2.2" fill="#ff8fa0" opacity=".6"/>' +
+      '<path d="M27,-17 Q31,-14 35,-16.6" stroke="#4a3a5a" stroke-width="1.6" fill="none" stroke-linecap="round"/>' +
+      '<ellipse cx="45.5" cy="-16" rx="2.4" ry="1.8" fill="#fff4b8" stroke="#c99a35" stroke-width="1"/>' +
+      '<path d="M-33,-50 H2" stroke="#fff" stroke-opacity=".8" stroke-width="2.2" stroke-linecap="round"/>'
+  },
+  // 蒸気機関車: 黒いボイラー、大きなえんとつ、赤い車輪
+  engineSL: {
+    x: -42, y: -82, w: 94, h: 88, seed: 6,
+    defs: lg('k', '#6a6680', '#2e2a3c') + lg('kb', '#58546c', '#24202e') + lg('gl', '#fbfeff', '#c4e6f8') + lg('gd', '#ffe08a', '#e9b440'),
+    body:
+      '<path d="M-36,-15 H40 Q43,-15 43,-12 V-8 Q43,-5 40,-5 H-36 Q-38,-5 -38,-8 V-12 Q-38,-15 -36,-15Z" fill="#c8423a" stroke="#6a1e1a" ' + LN + '/>' +
+      '<path d="M41,-14 L51,-4 L41,-4Z" fill="#8a8494" stroke="#3a3644" ' + LN + '/>' +
+      '<path d="M-35,-62 H-5 V-14 H-33 Q-35,-14 -35,-16Z" fill="url(#k)" stroke="#1e1a28" ' + LN + '/>' +
+      '<path d="M-39,-62 Q-20,-74 -1,-62 Q-1,-58 -4,-58 H-36 Q-39,-58 -39,-62Z" fill="#c8423a" stroke="#6a1e1a" ' + LN + '/>' +
+      '<rect x="-30" y="-54" width="17" height="15" rx="4.5" fill="url(#gl)" stroke="#1e1a28" ' + LN + '/>' +
+      '<circle cx="-21.5" cy="-44.5" r="5" fill="#ffd9bf"/><path d="M-26.8,-46.5 Q-21.5,-55 -16.2,-46.5 Q-21.5,-49 -26.8,-46.5Z" fill="#3a3a48"/>' +
+      '<circle cx="-19.5" cy="-44.5" r=".95" fill="#3a2a25"/>' +
+      '<path d="M-6,-46 H34 Q44,-46 44,-30 Q44,-14 34,-14 H-6Z" fill="url(#kb)" stroke="#1e1a28" ' + LN + '/>' +
+      '<rect x="5" y="-46" width="3" height="32" fill="url(#gd)"/><rect x="19" y="-46" width="3" height="32" fill="url(#gd)"/>' +
+      '<path d="M0,-46 Q6,-56 12,-46Z" fill="url(#gd)" stroke="#a87a22" ' + LN + '/>' +
+      '<path d="M19,-46 L21,-60 L15,-72 H35 L29,-60 L31,-46Z" fill="url(#kb)" stroke="#1e1a28" ' + LN + '/>' +
+      '<path d="M15,-72 H35" stroke="#c8423a" stroke-width="2.4" stroke-linecap="round"/>' +
+      '<rect x="36" y="-56" width="9" height="7" rx="2" fill="#3a3644"/><circle cx="41" cy="-51" r="2.6" fill="#fff4b8" stroke="#c99a35" stroke-width="1"/>' +
+      '<path d="M-4,-41 Q16,-43.5 36,-40" stroke="#fff" stroke-opacity=".35" stroke-width="2.6" fill="none" stroke-linecap="round"/>' +
+      '<ellipse cx="31" cy="-31" rx="6" ry="6.6" fill="#fff" stroke="#1e1a28" ' + LN + '/>' +
+      '<ellipse cx="37.5" cy="-21" rx="3.6" ry="2.4" fill="#ff8fa0" opacity=".6"/>' +
+      '<path d="M25,-21 Q30,-16.5 35,-20" stroke="#e8e0f0" stroke-width="1.8" fill="none" stroke-linecap="round"/>' +
+      '<path d="M-6,-16 H40" stroke="#c8423a" stroke-width="2.2"/>'
+  },
   treeRound: tree('round'), treeTall: tree('tall'), treeApple: tree('apple'),
   bush: {
     x: -32, y: -30, w: 64, h: 32, seed: 10, defs: rg('t', '#a4de80', '#5fb35a', '#3f8f4a'),
@@ -1777,10 +1857,11 @@ function drawNight(xs, xe) {
       ctx.save(); ctx.translate(g2.cx, g2.cy); ctx.rotate(g2.ang);
       if (g2.def.engine && S.state !== 'SLEEP') {
         // 前を照らすライト
-        const lg2 = ctx.createLinearGradient(38, 0, 150, 0); lg2.addColorStop(0, 'rgba(255,240,170,.42)'); lg2.addColorStop(1, 'rgba(255,240,170,0)');
-        ctx.fillStyle = lg2; ctx.beginPath(); ctx.moveTo(38, -36); ctx.lineTo(150, -64); ctx.lineTo(150, 6); ctx.lineTo(38, -30); ctx.closePath(); ctx.fill();
-        circ(38.5, -34, 7, 'rgba(255,250,200,.6)');
-        rr(-28.5, -50, 18, 16, 5); ctx.fillStyle = 'rgba(255,200,110,.35)'; ctx.fill();
+        const sty = styleNow(), lx = sty.light.x, ly = sty.light.y;
+        const lg2 = ctx.createLinearGradient(lx, 0, lx + 112, 0); lg2.addColorStop(0, 'rgba(255,240,170,.42)'); lg2.addColorStop(1, 'rgba(255,240,170,0)');
+        ctx.fillStyle = lg2; ctx.beginPath(); ctx.moveTo(lx, ly - 2); ctx.lineTo(lx + 112, ly - 30); ctx.lineTo(lx + 112, ly + 40); ctx.lineTo(lx, ly + 4); ctx.closePath(); ctx.fill();
+        circ(lx, ly, 7, 'rgba(255,250,200,.6)');
+        if (sty.cab) { rr(sty.cab[0], sty.cab[1], sty.cab[2], sty.cab[3], 5); ctx.fillStyle = 'rgba(255,200,110,.35)'; ctx.fill(); }
       } else if (!g2.def.engine) {
         for (const wx of [-20, 4]) { rr(wx, -34, 16, 15, 4.5); ctx.fillStyle = 'rgba(255,200,110,.4)'; ctx.fill(); }
         const wg = ctx.createRadialGradient(0, -26, 4, 0, -26, 34); wg.addColorStop(0, 'rgba(255,190,100,.22)'); wg.addColorStop(1, 'rgba(255,190,100,0)');
@@ -1910,9 +1991,9 @@ function drawFace(x, y, r) {
   circ(x - r * 0.35, y - r * 0.1, r * 0.14, '#333'); circ(x + r * 0.35, y - r * 0.1, r * 0.14, '#333');
   ctx.beginPath(); ctx.arc(x, y + r * 0.1, r * 0.4, 0.2, 2.9); ctx.strokeStyle = '#a0522d'; ctx.lineWidth = 1.2; ctx.stroke();
 }
-function drawWheel(x, y, r) {
+function drawWheel(x, y, r, red) {
   const g = ctx.createRadialGradient(x - r * 0.35, y - r * 0.35, 1, x, y, r);
-  g.addColorStop(0, '#7d7690'); g.addColorStop(1, '#343040');
+  g.addColorStop(0, red ? '#f0776a' : '#7d7690'); g.addColorStop(1, red ? '#a3302b' : '#343040');
   circ(x, y, r, g, 'rgba(30,26,40,.7)', 1.2);
   circ(x, y, r - 2, null, 'rgba(200,196,216,.55)', 1);
   const a = S.trainX / r;
@@ -1927,18 +2008,22 @@ function drawCar(g) {
   const bob = S.vel > 5 ? -Math.abs(Math.sin(S.trainX * 0.07 + (c.engine ? 0 : 1.2))) * 1.1 * Math.min(1, S.vel / 120) : 0;
   ctx.save(); ctx.translate(g.cx, g.cy + bob); ctx.rotate(g.ang);
   if (S.jiggle > 0) { const k = S.jiggle / 0.4, q = Math.sin(k * 22) * 0.09 * k; ctx.scale(1 + q, 1 - q); }
+  const sty = styleNow();
   if (c.engine) {
-    if (spr('engine', 0, 0)) {
-      if (S.state === 'SLEEP' || S.time % 3.4 < 0.13) { ctx.beginPath(); ctx.moveTo(21.5, -30); ctx.quadraticCurveTo(26.5, -27, 31.5, -30); ctx.strokeStyle = '#6b2a2a'; ctx.lineWidth = 2; ctx.stroke(); }
-      else { circ(28.3, -30, 3.3, '#2a211c'); circ(29.4, -31.4, 1.1, '#fff'); }
+    if (spr(sty.engine, 0, 0)) {
+      const ey = sty.eye;
+      if (S.state === 'SLEEP' || S.time % 3.4 < 0.13) { ctx.beginPath(); ctx.moveTo(ey.cx - 5, ey.y); ctx.quadraticCurveTo(ey.cx, ey.y + 3, ey.cx + 5, ey.y); ctx.strokeStyle = '#6b2a2a'; ctx.lineWidth = 2; ctx.stroke(); }
+      else { circ(ey.x, ey.y, 3.3, '#2a211c'); circ(ey.x + 1.1, ey.y - 1.4, 1.1, '#fff'); }
     } else drawEngineSimple(c);
-    drawWheel(-20, -7, 7); drawWheel(0, -7, 7); drawWheel(20, -7, 7);
-    const ra = S.trainX / 7, ox = Math.cos(ra) * 3.2, oy = Math.sin(ra) * 3.2;
-    ctx.lineCap = 'round'; ctx.strokeStyle = 'rgba(40,34,50,.75)'; ctx.lineWidth = 3.6; ctx.beginPath(); ctx.moveTo(-20 + ox, -7 + oy); ctx.lineTo(20 + ox, -7 + oy); ctx.stroke();
-    ctx.strokeStyle = '#d6d2e2'; ctx.lineWidth = 2; ctx.stroke();
-    for (const wx of [-20, 0, 20]) circ(wx + ox, -7 + oy, 1.5, '#8a8498');
+    drawWheel(-20, -7, 7, sty.wheel); drawWheel(0, -7, 7, sty.wheel); drawWheel(20, -7, 7, sty.wheel);
+    if (sty.rod) {
+      const ra = S.trainX / 7, ox = Math.cos(ra) * 3.2, oy = Math.sin(ra) * 3.2;
+      ctx.lineCap = 'round'; ctx.strokeStyle = 'rgba(40,34,50,.75)'; ctx.lineWidth = 3.6; ctx.beginPath(); ctx.moveTo(-20 + ox, -7 + oy); ctx.lineTo(20 + ox, -7 + oy); ctx.stroke();
+      ctx.strokeStyle = '#d6d2e2'; ctx.lineWidth = 2; ctx.stroke();
+      for (const wx of [-20, 0, 20]) circ(wx + ox, -7 + oy, 1.5, '#8a8498');
+    }
   } else {
-    if (!spr(c.spr, 0, 0)) drawCarSimple(c);
+    if (!spr(sty.cars[(S.geom.indexOf(g) + 1) % 2], 0, 0)) drawCarSimple(c);
     const ci = S.geom.indexOf(g);
     S.riders.forEach((r, k) => {
       if (r.pending || 1 + (k >> 1) !== ci) return;
@@ -2222,7 +2307,7 @@ S.camX = S.trainX - 0.32 * S.W;
 S.geom = trainGeom();
 // 絵の準備ができてから始める(読み込みに失敗した絵は簡易描画で代用。最長2秒で開始)
 Promise.race([loadSprites(), new Promise(r => setTimeout(r, 2000))]).then(() => requestAnimationFrame(frame));
-if (/[?&]debug\b/.test(location.search)) window.__nz = { S, makeBridge, sag, config, SPR, ctx, drawAnimal, drawRider, drawCar, drawSky, sunPos, scenery, cloudList, audio, trainHidden, wakeUp };
+if (/[?&]debug\b/.test(location.search)) window.__nz = { S, makeBridge, sag, config, SPR, ctx, drawAnimal, drawRider, drawCar, drawSky, sunPos, scenery, cloudList, audio, trainHidden, wakeUp, update, styleNow };
 })();
 </script>
 </body>
