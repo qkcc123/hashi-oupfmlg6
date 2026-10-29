@@ -107,7 +107,8 @@ const S = {
   sceneNo: 0, fishT: 3, shake: 0, heartT: 0, drawDist: 0, jiggle: 0, sunSpin: 0, lastToot: -9, particles: [], animals: [], hopY: 0, wave: false, rw: {}, smokeT: 0, tickX: 0, geom: [], lastPon: 0,
   peeks: new Map(), peekN: 0, birds: [], puffs: new Map(),
   tunnels: [], period: 0, nightK: 0,
-  homes: [], playT: 0, sleepMin: 0, sleepDue: false, zT: 0, veh: 0
+  homes: [], playT: 0, sleepMin: 0, sleepDue: false, zT: 0, veh: 0,
+  periodStart: 0, rainK: 0, snowK: 0, bowK: 0, patterT: 0
 };
 try { S.sleepMin = [0, 5, 10, 15, 20].indexOf(+localStorage.getItem('nazotte.sleepMin')) > 0 ? +localStorage.getItem('nazotte.sleepMin') : 0; } catch (e) {}
 
@@ -411,7 +412,7 @@ function updateTunnel(t, dt) {
   // まるごと隠れたら、ゴーという音。中で乗り物が入れかわる(出てくるときは別の乗り物)
   if (!t.hid && S.trainX - TRAIN_LEN > t.L + 4) { t.hid = true; S.veh++; audio.rumble(); }
   if (!t.out && S.trainX >= t.R - 2) {
-    t.out = true; S.period++; audio.chime();
+    t.out = true; S.period++; S.periodStart = S.sceneNo + 1; audio.chime();
     for (let i = 0; i < 3; i++) stars(t.R + 10, GY - 40 - i * 12, 4);
   }
   if (S.trainX - TRAIN_LEN > t.R + 40) nextScene();
@@ -433,7 +434,52 @@ function nextScene() {
   go('RUN');
 }
 
-function weatherNow() { return 'sun'; }
+// 今の天気。雨の時間帯は、3場面目で雨がやんで虹('after')になる
+function weatherNow() {
+  const w = periodNow().w;
+  if (w === 'rain' && S.sceneNo - S.periodStart >= 2) return 'after';
+  return w;
+}
+function updateWeather(dt) {
+  const w = weatherNow(), k = 1 - Math.exp(-dt * 0.6);
+  S.rainK += ((w === 'rain' ? 1 : 0) - S.rainK) * k;
+  S.snowK += ((w === 'snow' ? 1 : 0) - S.snowK) * k;
+  S.bowK += ((w === 'after' ? 1 : 0) - S.bowK) * k * 0.7;
+  // 雨のぱらぱらという小さな音
+  if (S.rainK > 0.3) { S.patterT -= dt; if (S.patterT <= 0) { S.patterT = rand(0.12, 0.3); audio.noise(0.05, 0.02 * S.rainK, rand(2500, 5000)); } }
+}
+// 雨・雪(画面に対して降らせる。粒の数は軽量モードで減らす)
+function drawWeather() {
+  const n = S.lowFx ? 0.4 : 1, t = S.time;
+  if (S.rainK > 0.02) {
+    ctx.strokeStyle = 'rgba(120,170,230,' + (0.55 * S.rainK).toFixed(2) + ')'; ctx.lineWidth = 1.6; ctx.lineCap = 'round';
+    ctx.beginPath();
+    for (let i = 0; i < 70 * n; i++) {
+      const x = ((hash(i + 900) * (S.W + 60) - t * 60 - S.camX * 0.6) % (S.W + 60) + S.W + 60) % (S.W + 60) - 30;
+      const y = ((hash(i + 950) * 440 + t * (380 + hash(i) * 80)) % 440) - S.oy - 40;
+      ctx.moveTo(x, y); ctx.lineTo(x - 3, y + 11);
+    }
+    ctx.stroke();
+  }
+  if (S.snowK > 0.02) {
+    ctx.fillStyle = 'rgba(255,255,255,' + (0.9 * S.snowK).toFixed(2) + ')';
+    for (let i = 0; i < 60 * n; i++) {
+      const sp = 26 + hash(i + 1200) * 26, r = 1.6 + hash(i + 1300) * 2.2;
+      const x = ((hash(i + 1100) * (S.W + 40) + Math.sin(t * 0.9 + i) * 14 - S.camX * 0.5) % (S.W + 40) + S.W + 40) % (S.W + 40) - 20;
+      const y = ((hash(i + 1150) * 420 + t * sp) % 420) - S.oy - 20;
+      ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2832); ctx.fill();
+    }
+  }
+}
+// 雨のあとの大きな空の虹
+function drawSkyBow() {
+  if (S.bowK < 0.02) return;
+  const cx = S.W * 0.42 - S.camX * 0.01, cy = 300, R0 = Math.min(330, S.W * 0.48);
+  const cols = ['#ff8a8a', '#ffb870', '#ffe27a', '#9be3a8', '#8ccaf7', '#bba6f5'];
+  ctx.save(); ctx.globalAlpha = 0.42 * S.bowK * (1 - S.nightK); ctx.lineWidth = 11;
+  cols.forEach((c, i) => { ctx.strokeStyle = c; ctx.beginPath(); ctx.arc(cx, cy, R0 - i * 10, Math.PI * 1.05, Math.PI * 1.95); ctx.stroke(); });
+  ctx.restore();
+}
 
 /* ================= particles ================= */
 function addP(p) { if (S.particles.length > (S.lowFx ? 140 : config.maxParticles)) S.particles.shift(); S.particles.push(p); }
@@ -795,6 +841,7 @@ function update(dt) {
   }
   lerpTheme(dt);
   updateScenery(dt);
+  updateWeather(dt);
   // 踏切の警報音(遮断機が下りている間、カンカン)
   if (cur.kind === 'crossing' && (S.state === 'GATE' || S.state === 'PASS' || (S.state === 'REWARD' && cur.gate > 0.6))) {
     S.bellT -= dt; if (S.bellT <= 0) { S.bellT = 0.34; audio.bell(); }
@@ -970,7 +1017,7 @@ function closeMenu() { S.menuOpen = false; menuEl.style.display = 'none'; }
 function wakeUp() {
   if (S.state !== 'SLEEP') return;
   S.playT = 0; S.sleepDue = false;
-  if (periodNow().night) S.period++;
+  if (periodNow().night) { S.period++; S.periodStart = S.sceneNo + 1; }
   audio.init(); lockScreen(); audio.whistle(); S.jiggle = 0.4;
   nextScene();
 }
@@ -1362,7 +1409,9 @@ function starPath(r) {
 /* ================= render: background ================= */
 function drawSky() {
   const g = ctx.createLinearGradient(0, -S.oy, 0, 300);
-  g.addColorStop(0, rgb(th.top)); g.addColorStop(1, rgb(th.bot));
+  // 雨は灰色がかった空、雪は白っぽい空
+  const wk = S.rainK * 0.5, sk = S.snowK * 0.35;
+  g.addColorStop(0, rgb(mixC(mixC(th.top, [150, 160, 178], wk), [222, 230, 242], sk))); g.addColorStop(1, rgb(mixC(mixC(th.bot, [200, 206, 216], wk), [246, 248, 252], sk)));
   ctx.fillStyle = g; ctx.fillRect(0, -S.oy, S.W, config.H + S.oy);
   // 水彩のにじみ(空にうっすら色むら)
   for (const [px, py, r, a] of [[0.2, 40, 170, 0.18], [0.6, 110, 220, 0.12]]) {
@@ -1377,7 +1426,8 @@ function drawSky() {
   const spin = S.time * 0.25 + (1 - Math.pow(S.sunSpin, 2)) * (S.sunSpin > 0 ? 6.2832 : 0);
   // 夜は太陽が沈む(月にかわる)
   if (S.nightK > 0.98) return;
-  ctx.save(); ctx.globalAlpha = 1 - S.nightK;
+  // 夜は沈み、雨の間はうすく
+  ctx.save(); ctx.globalAlpha = (1 - S.nightK) * (1 - 0.6 * S.rainK);
   ctx.save(); ctx.translate(sx, sy); ctx.rotate(spin);
   if (!spr('sunRays', 0, 0)) {
     ctx.strokeStyle = rgb(th.sun); ctx.lineWidth = 5;
@@ -1458,9 +1508,19 @@ function drawTrees(xs, xe) {
       // 触れた瞬間、茂みが「ぷるん」とゆれる
       const q = pk ? Math.sin(clamp((S.time - pk.t0) / 0.4, 0, 1) * Math.PI * 2) * 0.1 * (1 - clamp((S.time - pk.t0) / 0.4, 0, 1)) : Math.sin(S.time * 30) * 0.03 * tease;
       ctx.save(); ctx.translate(bush.x, GY + 6); ctx.scale(1 + q, 1 - q);
-      spr('bush', 0, 0, bush.sc); ctx.restore();
+      spr('bush', 0, 0, bush.sc);
+      if (S.snowK > 0.02) { ctx.globalAlpha = S.snowK * 0.95; ell(-2 * bush.sc, -24 * bush.sc, 17 * bush.sc, 5 * bush.sc, '#ffffff', null); ell(12 * bush.sc, -19 * bush.sc, 9 * bush.sc, 3.6 * bush.sc, '#ffffff', null); ctx.globalAlpha = 1; }
+      ctx.restore();
     }
     if (tree && !spr(tree.kind, tree.x, GY + 6, tree.sc)) circ(tree.x, GY - 34 * tree.sc, 22 * tree.sc, '#5ec47a');
+    // 木のてっぺんにも雪
+    if (tree && S.snowK > 0.02) {
+      const s = tree.sc, y = GY + 6 + (tree.kind === 'treeTall' ? -90 : -82) * s;
+      ctx.globalAlpha = S.snowK * 0.95;
+      if (tree.kind === 'treeTall') ell(tree.x, y + 2 * s, 11 * s, 6 * s, '#fff', null);
+      else { ell(tree.x - 6 * s, y + 2 * s, 18 * s, 6 * s, '#fff', null); ell(tree.x + 18 * s, y + 12 * s, 9 * s, 4 * s, '#fff', null); }
+      ctx.globalAlpha = 1;
+    }
   }
 }
 function drawRainbow(r) {
@@ -1524,6 +1584,12 @@ function drawWater(r) {
     const x = r.L + 8 + hash(j + r.L) * (g - 16), y = top + 8 + hash(j * 3 + r.L) * 50, s = 2 + al * 3;
     ctx.globalAlpha = al * 0.9; ctx.beginPath(); ctx.moveTo(x - s, y); ctx.lineTo(x + s, y); ctx.moveTo(x, y - s); ctx.lineTo(x, y + s); ctx.stroke();
   }
+  // 雨の日は水面に波紋
+  if (S.rainK > 0.05) for (let j = 0; j < 7; j++) {
+    const ph = (S.time * 0.9 + hash(j + r.L * 0.1)) % 1, x = r.L + 10 + hash(j * 7 + Math.floor(S.time * 0.9 + hash(j + r.L * 0.1)) * 3.1) * (g - 20), y = top + 8 + hash(j * 3 + 1) * 46;
+    ctx.globalAlpha = S.rainK * (1 - ph) * 0.8; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.3;
+    ctx.beginPath(); ctx.ellipse(x, y, 3 + ph * 12, 1 + ph * 4, 0, 0, 6.2832); ctx.stroke();
+  }
   ctx.globalAlpha = 0.45; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.lineCap = 'round';
   for (let row = 0; row < 3; row++) {
     const y = top + 16 + row * 20, x0 = r.L + 10 + row * 14, x1 = r.R - 10 - (2 - row) * 10;
@@ -1577,6 +1643,13 @@ function drawSeg(a, b, realL, realR) {
   ctx.strokeStyle = 'rgba(52,120,52,.5)'; ctx.lineWidth = 1.4; ctx.stroke();
   ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 1.6;
   ctx.beginPath(); ctx.moveTo(a + rl + 2, topY(a) + 2.5); ctx.lineTo(b - rrr - 2, topY(b) + 2.5); ctx.stroke();
+  // 雪がうっすら積もる
+  if (S.snowK > 0.02) {
+    ctx.beginPath(); ctx.moveTo(a + rl, topY(a + rl) + 1);
+    for (let x = a + rl; x <= b - rrr; x += 8) ctx.lineTo(x, topY(x) - 1.5 - Math.abs(Math.sin(x * 0.05)) * 2);
+    for (let x = b - rrr; x >= a + rl; x -= 8) ctx.lineTo(x, topY(x) + 10 + Math.sin(x * 0.13) * 3);
+    ctx.closePath(); ctx.fillStyle = 'rgba(255,255,255,' + (0.92 * S.snowK).toFixed(2) + ')'; ctx.fill();
+  }
   // 枕木とレール
   for (let x = Math.floor(a / 24) * 24; x < b; x += 24) {
     if (x < a || x + 12 > b) continue;
@@ -1785,13 +1858,26 @@ function drawMountain(t, front) {
   const cx = (t.L + t.R) / 2, a = t.L - 120, b = t.R + 120, top = GY - 150;
   ctx.save();
   if (front) { ctx.beginPath(); ctx.rect(t.L, -400, t.R - t.L, GY + 9 + 400); ctx.clip(); }
-  ctx.beginPath(); ctx.moveTo(a, GY + 8);
-  ctx.bezierCurveTo(a + 60, GY - 40, cx - 150, top + 6, cx - 40, top + 2);
-  ctx.quadraticCurveTo(cx, top - 14, cx + 46, top + 4);
-  ctx.bezierCurveTo(cx + 150, top + 10, b - 60, GY - 40, b, GY + 8); ctx.closePath();
+  const hill = () => {
+    ctx.beginPath(); ctx.moveTo(a, GY + 8);
+    ctx.bezierCurveTo(a + 60, GY - 40, cx - 150, top + 6, cx - 40, top + 2);
+    ctx.quadraticCurveTo(cx, top - 14, cx + 46, top + 4);
+    ctx.bezierCurveTo(cx + 150, top + 10, b - 60, GY - 40, b, GY + 8); ctx.closePath();
+  };
+  hill();
   const g = ctx.createLinearGradient(0, top, 0, GY + 8);
   g.addColorStop(0, '#9fd27a'); g.addColorStop(0.5, '#6db35a'); g.addColorStop(1, '#4f9447');
-  ctx.fillStyle = g; ctx.fill(); ctx.strokeStyle = 'rgba(40,90,40,.5)'; ctx.lineWidth = 1.6; ctx.stroke();
+  ctx.fillStyle = g; ctx.fill();
+  // 雪の日は山のてっぺんが白い(山の形で切り抜いて、下のふちを波形に)
+  if (S.snowK > 0.02) {
+    ctx.save(); hill(); ctx.clip();
+    ctx.globalAlpha = S.snowK; ctx.beginPath(); ctx.moveTo(a, top - 30);
+    ctx.lineTo(b, top - 30);
+    for (let x = b; x >= a; x -= 18) ctx.quadraticCurveTo(x - 9, top + 44 + Math.sin(x * 0.7) * 5, x - 18, top + 34);
+    ctx.closePath(); ctx.fillStyle = '#ffffff'; ctx.fill();
+    ctx.restore();
+  }
+  hill(); ctx.strokeStyle = 'rgba(40,90,40,.5)'; ctx.lineWidth = 1.6; ctx.stroke();
   // 水彩のにじみと、山の茂み
   ctx.fillStyle = 'rgba(255,255,230,.18)'; ctx.beginPath(); ctx.ellipse(cx - 40, top + 40, 80, 26, -0.2, 0, 6.2832); ctx.fill();
   for (let k = 0; k < 7; k++) {
@@ -2214,7 +2300,7 @@ function drawGuide() {
 function render() {
   ctx.setTransform(S.dpr * S.s, 0, 0, S.dpr * S.s, 0, S.dpr * S.s * S.oy);
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-  drawSky(); drawClouds(); drawBirds();
+  drawSky(); drawSkyBow(); drawClouds(); drawBirds();
   drawHills(0.25, 215, 40, 0.012, th.h1);
   drawHills(0.5, 238, 28, 0.02, th.h2);
   // 橋の完成時は、ガタガタではなく「ぽよん」と1回弾むだけ
@@ -2253,6 +2339,7 @@ function render() {
   drawGuide();
   drawReadyHint();
   ctx.restore();
+  drawWeather();
   // おやすみ: 25秒かけて画面を暗くしていく
   if (S.state === 'SLEEP') { ctx.fillStyle = 'rgba(10,12,30,' + Math.min(0.55, S.stateT / 25 * 0.55).toFixed(3) + ')'; ctx.fillRect(0, -S.oy, S.W, config.H + S.oy); }
   if (!S.lowFx) drawOverlay();
