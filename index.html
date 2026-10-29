@@ -87,7 +87,8 @@ const S = {
   camX: 0, trainX: 120, vel: 0, time: 0, state: 'READY', stateT: 0, callT: 0, ftAvg: 0.016, lowFx: false,
   rivers: [], crossings: [], stations: [], upcoming: null, riders: [], tapQueue: 0, cur: null, bellT: 0, riverCount: 0,
   stroke: [], primary: null, active: new Map(), idle: 0, lastMove: 0, strokeDone: false,
-  sceneNo: 0, fishT: 3, shake: 0, heartT: 0, drawDist: 0, jiggle: 0, sunSpin: 0, lastToot: -9, particles: [], animals: [], hopY: 0, wave: false, rw: {}, smokeT: 0, tickX: 0, geom: [], lastPon: 0
+  sceneNo: 0, fishT: 3, shake: 0, heartT: 0, drawDist: 0, jiggle: 0, sunSpin: 0, lastToot: -9, particles: [], animals: [], hopY: 0, wave: false, rw: {}, smokeT: 0, tickX: 0, geom: [], lastPon: 0,
+  peeks: new Map(), peekN: 0, birds: [], puffs: new Map()
 };
 
 /* ================= defs (拡張点) ================= */
@@ -219,6 +220,9 @@ const audio = {
   bell() { this.tone(880, { dur: 0.16, type: 'triangle', gain: 0.2 }); this.tone(1320, { dur: 0.08, gain: 0.06 }); },
   honk() { this.tone(440, { dur: 0.12, type: 'square', gain: 0.09 }); this.tone(554, { dur: 0.12, type: 'square', gain: 0.06 });
     this.tone(440, { dur: 0.16, type: 'square', gain: 0.09, delay: 0.18 }); this.tone(554, { dur: 0.16, type: 'square', gain: 0.06, delay: 0.18 }); },
+  // ぽわっ(雲)
+  puff() { this.tone(260, { dur: 0.25, type: 'sine', gain: 0.16, slide: 1.6 }); this.noise(0.25, 0.05, 900); },
+  cry(kind) { this.pop(); },
   twinkle() { [1568, 2093, 2637].forEach((f, i) => this.tone(f, { dur: 0.18, gain: 0.1, delay: i * 0.06 })); }
 };
 try { audio.muted = localStorage.getItem('nazotte.muted') === '1'; } catch (e) {}
@@ -304,12 +308,12 @@ function makeCrossing(afterX) {
 // 駅: stopX に電車の先頭が止まる。pL〜pR がホーム。waiting=待っている動物、alighter=降りてくる動物
 function makeStation(afterX) {
   const stopX = afterX + config.riverDist + rand(0, 160) + 120;
-  const kinds = ['bear', 'rabbit', 'cat'].sort(() => Math.random() - 0.5);
+  const kinds = ANIMALS.slice().sort(() => Math.random() - 0.5);
   return {
     kind: 'station', stopX, L: stopX + config.stopGap, R: stopX + config.stopGap + 10,
     pL: stopX - TRAIN_LEN - 60, pR: stopX + 60,
     waiting: [0, 1, 2].map(i => ({ kind: kinds[i], x: stopX - 112 + i * 38, y: GY + 8, state: 'wait', t: 0, car: i % 2 ? 2 : 1 })),
-    alighter: { kind: ['bear', 'rabbit', 'cat'][(Math.random() * 3) | 0], x: 0, y: 0, t: -1 }, nextT: 0
+    alighter: { kind: ANIMALS[(Math.random() * ANIMALS.length) | 0], x: 0, y: 0, t: -1 }, nextT: 0
   };
 }
 // 場面を1つ作って、描画用のリストに入れる
@@ -332,6 +336,8 @@ function nextScene() {
   S.animals = S.animals.filter(a => a.x > S.camX - 200);
   go('RUN');
 }
+
+function weatherNow() { return 'sun'; }
 
 /* ================= particles ================= */
 function addP(p) { if (S.particles.length > (S.lowFx ? 140 : config.maxParticles)) S.particles.shift(); S.particles.push(p); }
@@ -362,11 +368,83 @@ function fish(x) {
   addP({ type: 'fish', x, y: top, wy: top + 1, vx: rand(-40, 40), vy: -rand(190, 250), g: 520, life: 2, max: 2, size: 1, color: ['#ff9f43', '#ff6b81', '#ffd24a'][(Math.random() * 3) | 0] });
 }
 function spawnAnimals() {
-  const kinds = [
-    { t: 'bear', col: '#b9824f' }, { t: 'rabbit', col: '#ffffff' }, { t: 'cat', col: '#f1a64b' }
-  ].sort(() => Math.random() - 0.5);
+  const kinds = ANIMALS.slice().sort(() => Math.random() - 0.5).slice(0, 3);
   const xs = [S.cur.R + 70, S.cur.R + 135, S.cur.R + 200];
-  kinds.forEach((k, i) => S.animals.push({ kind: k.t, col: k.col, x: xs[i], y: GY + 78 + (i % 2) * 8, t0: S.time + 0.2 + i * 0.35, popped: false }));
+  kinds.forEach((k, i) => S.animals.push({ kind: k, x: xs[i], y: GY + 78 + (i % 2) * 8, t0: S.time + 0.2 + i * 0.35, popped: false }));
+}
+
+/* ================= いないいないばあ(茂み・木・雲) ================= */
+const PEEK_UP = 0.3, PEEK_STAY = 2.4;
+// なぞる川の近くでは、なぞりを優先する(風景のタッチにしない)
+function nearDrawZone(x) {
+  const c = S.cur;
+  return c && c.kind === 'river' && !c.bridge && x > c.L - 60 && x < c.R + config.finishOver + 60;
+}
+// 触れた所に茂み・木・雲があれば、動物・小鳥・雨を出して true
+function pokeScenery(w, lx, ly) {
+  const i0 = Math.floor(w.x / 130);
+  // 雲は空の上の方なので、なぞる場所とは重ならない
+  for (let i = i0 - 1; i <= i0 + 1 && !nearDrawZone(w.x); i++) {
+    const { bush, tree } = scenery(i);
+    if (bush && Math.abs(w.x - bush.x) < 34 * bush.sc + 12 && w.y > GY - 30 * bush.sc - 40 && w.y < GY + 18) {
+      const pk = S.peeks.get(i);
+      // 出ている動物をもう一度触ると、ぴょんと跳ねてもう一度鳴く
+      if (pk && S.time - pk.t0 < PEEK_UP + PEEK_STAY) { pk.t0 = Math.min(pk.t0, S.time - PEEK_UP); pk.hop = S.time; audio.cry(pk.kind); return true; }
+      const kind = ANIMALS[S.peekN++ % ANIMALS.length];
+      S.peeks.set(i, { kind, t0: S.time, hop: -9 });
+      audio.pop(); setTimeout(() => audio.cry(kind), 220);
+      sparks(bush.x, GY - 30, 8);
+      return true;
+    }
+    if (tree && Math.abs(w.x - tree.x) < 36 * tree.sc + 8 && w.y > GY + 6 - 100 * tree.sc && w.y < GY + 6 - 26 * tree.sc) {
+      if (S.birds.length < 8) {
+        const col = ['#ffd24a', '#7fd6ff', '#ff8fb1'][(S.peekN++) % 3];
+        S.birds.push({ x: tree.x + rand(-10, 10), y: GY + 6 - 62 * tree.sc, vx: rand(50, 80) * (Math.random() < 0.5 ? -1 : 1), vy: -rand(70, 95), t: 0, col });
+        audio.cry('bird');
+      }
+      sparks(w.x, w.y, 6, ['#b8f08a', '#ffffff', '#7fd36b']);
+      return true;
+    }
+  }
+  const cl = cloudAt(lx, ly);
+  if (cl) {
+    S.puffs.set(cl.i, S.time);
+    const snow = weatherNow() === 'snow';
+    for (let k = 0; k < (snow ? 14 : 18); k++) addP(snow
+      ? { type: 'flake', x: cl.x + S.camX + rand(-40, 40) * cl.sc, y: cl.y + 8, vx: rand(-10, 10), vy: rand(20, 40), g: 0, life: 3.2, max: 3.2, size: rand(2.4, 4), color: '#fff', ph: rand(0, 6) }
+      : { type: 'drop', x: cl.x + S.camX + rand(-40, 40) * cl.sc, y: cl.y + 8 + rand(0, 20), vx: 0, vy: rand(180, 240), g: 300, life: 0.9, max: 0.9, size: 1, color: '#7cc3f5' });
+    audio.puff();
+    return true;
+  }
+  return false;
+}
+function updateScenery(dt) {
+  for (const [i, pk] of S.peeks) if (S.time - pk.t0 > PEEK_UP * 2 + PEEK_STAY) S.peeks.delete(i);
+  for (const [i, t] of S.puffs) if (S.time - t > 0.6) S.puffs.delete(i);
+  for (const b of S.birds) { b.t += dt; b.x += b.vx * dt; b.y += b.vy * dt; b.vy += (b.t < 0.4 ? 40 : -10) * dt; }
+  S.birds = S.birds.filter(b => b.t < 5);
+}
+// 茂みの後ろから、動物がぴょこっと顔を出す(下は地面に隠れる)
+function drawPeek(pk, x, sc) {
+  const age = S.time - pk.t0;
+  const up = pk.tease ? 0.7 * pk.tease : age < PEEK_UP ? easeOutBack(age / PEEK_UP) : age < PEEK_UP + PEEK_STAY ? 1 : 1 - clamp((age - PEEK_UP - PEEK_STAY) / PEEK_UP, 0, 1);
+  const hop = Math.max(0, Math.sin(clamp((S.time - pk.hop) / 0.35, 0, 1) * Math.PI)) * 10;
+  const y = GY + 8 + (1 - up) * 80 - 6 * sc - hop;
+  ctx.save(); ctx.translate(x + 4, y); ctx.scale(0.72, 0.72);
+  drawAnimalArm(ANIMAL_COL[pk.kind], age, up > 0.9);
+  spr(pk.kind, 0, 0);
+  ctx.restore();
+}
+function drawBirdsFlying() {
+  for (const b of S.birds) {
+    const f = Math.sin(b.t * 22) * 5, d = b.vx < 0 ? -1 : 1;
+    ctx.save(); ctx.translate(b.x, b.y); ctx.scale(d, 1);
+    ell(0, 0, 8, 6.5, b.col, 'rgba(80,60,40,.6)');
+    ctx.beginPath(); ctx.moveTo(-2, -1); ctx.quadraticCurveTo(-6, -8 - f, -12, -6 - f); ctx.quadraticCurveTo(-7, 1, -2, 2); fs('#ffffff', 'rgba(80,60,40,.6)', 1.2);
+    ctx.beginPath(); ctx.moveTo(7, -2); ctx.lineTo(12, 0); ctx.lineTo(7, 2); fs('#ffa63d', null);
+    circ(3.5, -2, 1.3, '#2a211c');
+    ctx.restore();
+  }
 }
 
 /* ================= game flow ================= */
@@ -594,6 +672,7 @@ function update(dt) {
     }
   }
   lerpTheme(dt);
+  updateScenery(dt);
   // 踏切の警報音(遮断機が下りている間、カンカン)
   if (cur.kind === 'crossing' && (S.state === 'GATE' || S.state === 'PASS' || (S.state === 'REWARD' && cur.gate > 0.6))) {
     S.bellT -= dt; if (S.bellT <= 0) { S.bellT = 0.34; audio.bell(); }
@@ -681,8 +760,8 @@ function onDown(e) {
   }
   const w = toWorld(e.clientX, e.clientY);
   const palm = e.pointerType === 'touch' && (e.width > config.palmSize || e.height > config.palmSize);
-  S.active.set(e.pointerId, { wx: w.x, wy: w.y, palm });
-  if (S.state === 'GUIDE') S.idle = 0;
+  const ent = { wx: w.x, wy: w.y, palm };
+  S.active.set(e.pointerId, ent);
   if (!palm) {
     buzz(6);
     // 最初のタッチで出発(このタッチで音も解禁される)
@@ -692,6 +771,10 @@ function onDown(e) {
       go('RUN');
       return;
     }
+    // 茂み・木・雲に触れたら、いないいないばあ(このタッチは、なぞり・踏切・駅には使わない)
+    const onTrain = S.geom.some(g => Math.abs(w.x - g.cx) < g.def.len / 2 + 10 && w.y > g.cy - 78 && w.y < g.cy + 8);
+    if (!onTrain && pokeScenery(w, e.clientX / S.s, e.clientY / S.s - S.oy)) { ent.palm = true; return; }
+    if (S.state === 'GUIDE') S.idle = 0;
     if (S.state === 'GUIDE' && S.cur.kind === 'station') S.tapQueue = Math.min(3, S.tapQueue + 1);
     // 電車をタッチ → ぽっ(汽笛)とぷるん
     if (S.state !== 'GUIDE' && S.state !== 'DRAW' && S.geom.some(g => Math.abs(w.x - g.cx) < g.def.len / 2 + 10 && w.y > g.cy - 78 && w.y < g.cy + 8) && S.time - S.lastToot > 0.6) {
@@ -716,7 +799,7 @@ function onMove(e) {
   e.preventDefault();
   const w = toWorld(e.clientX, e.clientY);
   p.wx = w.x; p.wy = w.y;
-  if (S.state === 'GUIDE') S.idle = 0;
+  if (S.state === 'GUIDE' && !p.palm) S.idle = 0;
   if (S.state === 'DRAW' && e.pointerId === S.primary && !S.strokeDone) {
     const last = S.stroke[S.stroke.length - 1];
     if (!last || Math.hypot(w.x - last.x, w.y - last.y) >= 4) {
@@ -859,8 +942,10 @@ function tree(kind) {
 const ANIMAL_COL = {
   bear: { c1: '#cf9a64', c2: '#a56f3e', ol: '#7a4e2c', light: '#f5dfc0', inner: '#e6b98c', arm: '#bb8452' },
   rabbit: { c1: '#ffffff', c2: '#ece4db', ol: '#b7a698', light: '#ffffff', inner: '#ffb9c9', arm: '#f6f1eb' },
-  cat: { c1: '#f9b866', c2: '#df8a33', ol: '#a8641f', light: '#fff1dc', inner: '#ffb9c0', arm: '#ec9c48' }
+  cat: { c1: '#f9b866', c2: '#df8a33', ol: '#a8641f', light: '#fff1dc', inner: '#ffb9c0', arm: '#ec9c48' },
+  dog: { c1: '#fbeedb', c2: '#e6cba4', ol: '#9a7650', light: '#ffffff', inner: '#a8754a', arm: '#f1dfc4' }
 };
+const ANIMALS = ['bear', 'rabbit', 'cat', 'dog'];
 function animal(kind) {
   const c = ANIMAL_COL[kind];
   // 外形(足・胴・左腕・耳・頭)を1つのシルエットとして輪郭を付ける
@@ -878,6 +963,9 @@ function animal(kind) {
     parts.push(['path d="M-11,-66 C-16,-82 -15,-98 -8,-98 C-2,-98 -2,-82 -3,-68Z"', 'url(#a)'], ['path d="M11,-66 C16,-82 15,-98 8,-98 C2,-98 2,-82 3,-68Z"', 'url(#a)']);
     inner = '<path d="M-8.5,-70 C-11,-80 -11,-92 -8,-93 C-5.5,-92 -5.5,-80 -6,-70Z" fill="' + c.inner + '"/><path d="M8.5,-70 C11,-80 11,-92 8,-93 C5.5,-92 5.5,-80 6,-70Z" fill="' + c.inner + '"/>';
     face = '<ellipse cx="0" cy="-50" rx="2.4" ry="1.8" fill="#ff8fa8"/><path d="M-3,-46.5 Q-1.5,-45 0,-47.5 Q1.5,-45 3,-46.5" stroke="#9a6b62" stroke-width="1.1" fill="none" stroke-linecap="round"/>';
+  } else if (kind === 'dog') {
+    face = '<ellipse cx="0" cy="-47" rx="8.5" ry="6" fill="' + c.light + '"/><ellipse cx="0" cy="-50.5" rx="3.4" ry="2.5" fill="#3a2a22"/><ellipse cx="-.8" cy="-51.3" rx="1" ry=".6" fill="#fff" opacity=".7"/>' +
+      '<path d="M-3.5,-46 Q-1.7,-44 0,-46.6 Q1.7,-44 3.5,-46" stroke="#6b4a32" stroke-width="1.2" fill="none" stroke-linecap="round"/><path d="M-1.6,-44.8 Q0,-41 1.6,-44.8Z" fill="#ff8fa0"/>';
   } else {
     parts.push(['path d="M-16,-58 L-13,-80 L-1,-68Z"', 'url(#a)'], ['path d="M16,-58 L13,-80 L1,-68Z"', 'url(#a)']);
     inner = '<path d="M-13,-63 L-12,-74 L-6,-67Z" fill="' + c.inner + '"/><path d="M13,-63 L12,-74 L6,-67Z" fill="' + c.inner + '"/>';
@@ -893,6 +981,9 @@ function animal(kind) {
       '<circle cx="-6" cy="-56" r="2.3" fill="#2a211c"/><circle cx="6" cy="-56" r="2.3" fill="#2a211c"/><circle cx="-5.3" cy="-56.8" r=".8" fill="#fff"/><circle cx="6.7" cy="-56.8" r=".8" fill="#fff"/>' +
       '<ellipse cx="-10.5" cy="-49" rx="3.4" ry="2.2" fill="#ff9aa8" opacity=".6"/><ellipse cx="10.5" cy="-49" rx="3.4" ry="2.2" fill="#ff9aa8" opacity=".6"/>' +
       face + '<ellipse cx="-6" cy="-65" rx="6" ry="3" fill="#fff" opacity=".3" transform="rotate(-20 -6 -65)"/>' +
+      // いぬ: たれ耳は頭の上に重ねて描く
+      (kind === 'dog' ? '<path d="M-13,-67 C-22,-68 -27,-56 -24,-45 C-22,-40 -17,-42 -16,-48 C-15,-55 -12,-60 -13,-67Z" fill="' + c.inner + '" stroke="' + c.ol + '" stroke-width="2" stroke-linejoin="round"/>' +
+        '<path d="M13,-67 C22,-68 27,-56 24,-45 C22,-40 17,-42 16,-48 C15,-55 12,-60 13,-67Z" fill="' + c.inner + '" stroke="' + c.ol + '" stroke-width="2" stroke-linejoin="round"/>' : '') +
       '<path d="M-6,-3 h3 M5,-3 h3" stroke="' + c.ol + '" stroke-opacity=".5" stroke-width="1" stroke-linecap="round"/>'
   };
 }
@@ -966,7 +1057,7 @@ const SPRITE_DEFS = {
     x: -54, y: -54, w: 108, h: 108, seed: 32, defs: lg('ry', '#fff1a8', '#ffc94d'),
     body: Array.from({ length: 10 }, (_, i) => '<path d="M0,-33 Q6.5,-41 0,-51 Q-6.5,-41 0,-33Z" transform="rotate(' + (i * 36) + ')" fill="url(#ry)" stroke="#f0a83a" stroke-opacity=".4" stroke-width="1.2"/>').join('')
   },
-  bear: animal('bear'), rabbit: animal('rabbit'), cat: animal('cat'),
+  bear: animal('bear'), rabbit: animal('rabbit'), cat: animal('cat'), dog: animal('dog'),
   fish: {
     x: -18, y: -11, w: 34, h: 22, seed: 41, wob: 1, defs: lg('f', '#ffc27a', '#ff8a3d'),
     body: '<path d="M-8,0 L-16,-7 Q-14,0 -16,7Z" fill="#ff9f52" stroke="#c8602a" ' + LN + '/>' +
@@ -1101,11 +1192,22 @@ function drawBirds() {
     ctx.beginPath(); ctx.moveTo(x - 10, y - f); ctx.quadraticCurveTo(x - 4, y - 5, x, y); ctx.quadraticCurveTo(x + 4, y - 5, x + 10, y - f); ctx.stroke();
   }
 }
-function drawClouds() {
-  const off = S.camX * 0.15 + S.time * 6;
+function cloudList() {
+  const off = S.camX * 0.15 + S.time * 6, out = [];
   for (let i = Math.floor(off / 260) - 1; i <= Math.ceil((off + S.W) / 260) + 1; i++) {
-    const h = hash(i + 99), x = i * 260 + h * 120 - off, y = 46 + hash(i + 7) * 60, sc = 0.75 + h * 0.5;
-    if (!spr(h > 0.5 ? 'cloud1' : 'cloud2', x, y, sc)) circ(x, y, 22 * sc, 'rgba(255,255,255,.92)');
+    const h = hash(i + 99);
+    out.push({ i, h, x: i * 260 + h * 120 - off, y: 46 + hash(i + 7) * 60, sc: 0.75 + h * 0.5 });
+  }
+  return out;
+}
+function cloudAt(lx, ly) { return cloudList().find(c => Math.abs(lx - c.x) < 56 * c.sc && Math.abs(ly - c.y + 4) < 30 * c.sc) || null; }
+function drawClouds() {
+  for (const c of cloudList()) {
+    const pt = S.puffs.get(c.i), u = pt === undefined ? 1 : clamp((S.time - pt) / 0.6, 0, 1);
+    const q = Math.sin(u * Math.PI * 3) * 0.12 * (1 - u);
+    ctx.save(); ctx.translate(c.x, c.y); ctx.scale(1 + q, 1 - q);
+    if (!spr(c.h > 0.5 ? 'cloud1' : 'cloud2', 0, 0, c.sc)) circ(0, 0, 22 * c.sc, 'rgba(255,255,255,.92)');
+    ctx.restore();
   }
 }
 // 水彩風の丘: 上が明るいグラデーション+にじんだ縁+わずかにずらした重ね塗り
@@ -1130,17 +1232,29 @@ function inGap(x, margin) {
   for (const c of S.crossings) if (x > c.L - 40 - margin && x < c.R + 40 + margin) return true;
   return false;
 }
+// 130px ごとの区画 i にある茂みと木(描画とタッチ判定で同じものを使う)
+function scenery(i) {
+  const h = hash(i + 3), bx = i * 130 + 65 + hash(i + 21) * 30, tx = i * 130 + h * 80;
+  return {
+    bush: hash(i + 33) > 0.22 && !inGap(bx, 36) ? { x: bx, sc: 0.85 + hash(i + 34) * 0.4 } : null,
+    tree: h >= 0.4 && !inGap(tx, 40) ? { x: tx, sc: 0.75 + hash(i + 11) * 0.5, kind: ['treeRound', 'treeTall', 'treeApple'][(hash(i + 17) * 3) | 0] } : null
+  };
+}
 function drawTrees(xs, xe) {
-  const kinds = ['treeRound', 'treeTall', 'treeApple'];
   for (let i = Math.floor(xs / 130) - 1; i <= Math.ceil(xe / 130); i++) {
-    const h = hash(i + 3);
-    const bx = i * 130 + 65 + hash(i + 21) * 30;
-    if (hash(i + 33) > 0.45 && !inGap(bx, 36)) spr('bush', bx, GY + 6, 0.7 + hash(i + 34) * 0.4);
-    if (h < 0.4) continue;
-    const x = i * 130 + h * 80;
-    if (inGap(x, 40)) continue;
-    const sc = 0.75 + hash(i + 11) * 0.5;
-    if (!spr(kinds[(hash(i + 17) * 3) | 0], x, GY + 6, sc)) circ(x, GY - 34 * sc, 22 * sc, '#5ec47a');
+    const { bush, tree } = scenery(i);
+    if (bush) {
+      const pk = S.peeks.get(i);
+      // ときどき茂みがガサガサゆれて、動物の耳がちらっと見える(触ってみたくなるように)
+      const tz = (S.time * 0.55 + hash(i + 50) * 9) % 9, tease = !pk && tz < 1.1 ? Math.sin(tz / 1.1 * Math.PI) : 0;
+      if (pk) drawPeek(pk, bush.x, bush.sc);
+      else if (tease > 0) drawPeek({ kind: ANIMALS[((i % 4) + 4) % 4], t0: S.time, hop: -9, tease }, bush.x, bush.sc);
+      // 触れた瞬間、茂みが「ぷるん」とゆれる
+      const q = pk ? Math.sin(clamp((S.time - pk.t0) / 0.4, 0, 1) * Math.PI * 2) * 0.1 * (1 - clamp((S.time - pk.t0) / 0.4, 0, 1)) : Math.sin(S.time * 30) * 0.03 * tease;
+      ctx.save(); ctx.translate(bush.x, GY + 6); ctx.scale(1 + q, 1 - q);
+      spr('bush', 0, 0, bush.sc); ctx.restore();
+    }
+    if (tree && !spr(tree.kind, tree.x, GY + 6, tree.sc)) circ(tree.x, GY - 34 * tree.sc, 22 * tree.sc, '#5ec47a');
   }
 }
 function drawRainbow(r) {
@@ -1634,6 +1748,8 @@ function drawParticles() {
     else if (p.type === 'star') { ctx.rotate(p.rot); starPath(p.size); fs(p.color, OUTLINE, 1.2); }
     else if (p.type === 'conf') { ctx.rotate(p.rot); ctx.fillStyle = p.color; ctx.fillRect(-p.size / 2, -p.size / 4, p.size, p.size / 2); }
     else if (p.type === 'smoke') { circ(0, 0, p.size * (1.6 - k * 0.6), p.color); }
+    else if (p.type === 'drop') { ctx.beginPath(); ctx.moveTo(0, -6); ctx.quadraticCurveTo(3.2, 0, 0, 2.6); ctx.quadraticCurveTo(-3.2, 0, 0, -6); fs(p.color, 'rgba(60,120,180,.5)', 0.8); }
+    else if (p.type === 'flake') { ctx.translate(Math.sin(S.time * 2 + p.ph) * 4, 0); circ(0, 0, p.size, 'rgba(255,255,255,.95)', 'rgba(150,180,220,.5)', 0.8); }
     else circ(0, 0, p.size * (0.4 + k * 0.6), p.color);
     ctx.restore();
   }
@@ -1759,6 +1875,7 @@ function render() {
   for (const c of S.crossings) if (c.R + 60 > xs && c.L - 60 < xe) drawCrossingFront(c);
   for (const st of S.stations) if (st.pR + 30 > xs && st.pL - 30 < xe) drawStationFront(st);
   for (const a of S.animals) drawAnimal(a);
+  drawBirdsFlying();
   drawParticles();
   drawStroke();
   drawGuide();
@@ -1816,7 +1933,7 @@ S.camX = S.trainX - 0.32 * S.W;
 S.geom = trainGeom();
 // 絵の準備ができてから始める(読み込みに失敗した絵は簡易描画で代用。最長2秒で開始)
 Promise.race([loadSprites(), new Promise(r => setTimeout(r, 2000))]).then(() => requestAnimationFrame(frame));
-if (/[?&]debug\b/.test(location.search)) window.__nz = { S, makeBridge, sag, config, SPR, ctx, drawAnimal, drawRider, drawCar, drawSky, sunPos };
+if (/[?&]debug\b/.test(location.search)) window.__nz = { S, makeBridge, sag, config, SPR, ctx, drawAnimal, drawRider, drawCar, drawSky, sunPos, scenery, cloudList, audio };
 })();
 </script>
 </body>
