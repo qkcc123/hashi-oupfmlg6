@@ -20,7 +20,12 @@ canvas{position:fixed;left:0;top:0;width:100%;height:100%;display:block;touch-ac
 #rotate{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#bfe6ff;z-index:5}
 #rotate svg{width:40vmin;height:40vmin;animation:turn 2.4s ease-in-out infinite}
 @keyframes turn{0%,20%{transform:rotate(0)}60%,100%{transform:rotate(-90deg)}}
-#menu{position:fixed;inset:0;display:none;align-items:center;justify-content:center;gap:28px;background:rgba(30,30,50,.5);z-index:10}
+#menu{position:fixed;inset:0;display:none;align-items:center;justify-content:center;flex-wrap:wrap;align-content:center;gap:24px;padding:16px;background:rgba(30,30,50,.5);z-index:10}
+#mSleep{position:relative}
+#mSleep span{position:absolute;right:8px;bottom:6px;min-width:30px;height:30px;border-radius:15px;background:#5b6bb5;color:#fff;
+  font:bold 17px/30px system-ui,sans-serif;text-align:center}
+#mSleep[data-min="0"] span{background:#aaa}
+#mWake{display:none;border-color:#ff9f43;box-shadow:0 4px 0 #d07a20}
 #menu button{width:96px;height:96px;border-radius:50%;background:#fff;border:5px solid #f0b429;
   box-shadow:0 4px 0 #c88a10;display:flex;align-items:center;justify-content:center;padding:0;cursor:pointer}
 #menu button svg{width:56px;height:56px}
@@ -48,6 +53,15 @@ canvas{position:fixed;left:0;top:0;width:100%;height:100%;display:block;touch-ac
   <button id="mFull" aria-label="fullscreen">
     <svg viewBox="0 0 24 24" fill="none" stroke="#555" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
       <path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg>
+  </button>
+  <button id="mSleep" data-min="0" aria-label="sleep timer">
+    <svg viewBox="0 0 24 24"><path d="M15.5 3.5a8.5 8.5 0 1 0 5 13.5 7 7 0 0 1-5-13.5z" fill="#ffd84a" stroke="#c89a20" stroke-width="1.2"/>
+      <path d="M17 6.5l.6 1.3 1.4.2-1 1 .2 1.4-1.2-.7-1.2.7.2-1.4-1-1 1.4-.2z" fill="#9ab0ff"/></svg>
+    <span>-</span>
+  </button>
+  <button id="mWake" aria-label="wake up">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5" fill="#ffc94d" stroke="#e09a20" stroke-width="1.2"/>
+      <path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1" stroke="#f0a83a" stroke-width="2" stroke-linecap="round"/></svg>
   </button>
   <button id="mClose" aria-label="close">
     <svg viewBox="0 0 24 24" fill="none" stroke="#e55" stroke-width="3" stroke-linecap="round"><path d="M5 5l14 14M19 5L5 19"/></svg>
@@ -92,8 +106,10 @@ const S = {
   stroke: [], primary: null, active: new Map(), idle: 0, lastMove: 0, strokeDone: false,
   sceneNo: 0, fishT: 3, shake: 0, heartT: 0, drawDist: 0, jiggle: 0, sunSpin: 0, lastToot: -9, particles: [], animals: [], hopY: 0, wave: false, rw: {}, smokeT: 0, tickX: 0, geom: [], lastPon: 0,
   peeks: new Map(), peekN: 0, birds: [], puffs: new Map(),
-  tunnels: [], period: 0, nightK: 0
+  tunnels: [], period: 0, nightK: 0,
+  homes: [], playT: 0, sleepMin: 0, sleepDue: false, zT: 0
 };
+try { S.sleepMin = [0, 5, 10, 15, 20].indexOf(+localStorage.getItem('nazotte.sleepMin')) > 0 ? +localStorage.getItem('nazotte.sleepMin') : 0; } catch (e) {}
 
 /* ================= defs (拡張点) ================= */
 const defs = {
@@ -136,7 +152,8 @@ function lerpTheme(dt) {
   const tgt = THEMES[Math.floor(S.period / 2) % THEMES.length], k = 1 - Math.exp(-dt * 0.35);
   for (const key in th) for (let i = 0; i < 3; i++) th[key][i] += (tgt[key][i] - th[key][i]) * k;
   // 昼⇔夜は、トンネルを出たところから約2秒でかわる
-  S.nightK += ((periodNow().night ? 1 : 0) - S.nightK) * (1 - Math.exp(-dt * 1.6));
+  const night = periodNow().night || (S.cur && S.cur.kind === 'home');
+  S.nightK += ((night ? 1 : 0) - S.nightK) * (1 - Math.exp(-dt * (S.cur && S.cur.kind === 'home' ? 0.5 : 1.6)));
 }
 function periodNow() { return config.periods[S.period % config.periods.length]; }
 
@@ -223,6 +240,14 @@ const audio = {
   // なぞっている間、右へ進むほど音が上がる
   drawNote(p) { this.tone(392 * Math.pow(2, p * 1.2), { dur: 0.09, type: 'sine', gain: 0.12 }); },
   toot() { this.blast(0, 0.22); },
+  // おやすみのオルゴール(きらきら星のはじめの部分)
+  lullaby() {
+    const C = 1046.5, D = 1174.7, E = 1318.5, F = 1396.9, G = 1568, A = 1760;
+    [C, C, G, G, A, A, G, 0, F, F, E, E, D, D, C].forEach((f, i) => {
+      if (!f) return;
+      this.tone(f, { dur: 0.9, gain: 0.07, delay: i * 0.46 }); this.tone(f * 2, { dur: 0.3, gain: 0.02, delay: i * 0.46 });
+    });
+  },
   doorChime() { this.tone(880, { dur: 0.45, gain: 0.18 }); this.tone(698.5, { dur: 0.7, gain: 0.18, delay: 0.32 }); },
   bell() { this.tone(880, { dur: 0.16, type: 'triangle', gain: 0.2 }); this.tone(1320, { dur: 0.08, gain: 0.06 }); },
   honk() { this.tone(440, { dur: 0.12, type: 'square', gain: 0.09 }); this.tone(554, { dur: 0.12, type: 'square', gain: 0.06 });
@@ -331,6 +356,13 @@ function makeTunnel(afterX) {
   const L = afterX + config.riverDist + rand(0, 160);
   return { kind: 'tunnel', L, R: L + config.tunnelLen, hid: false, out: false };
 }
+// おやすみの車庫: 電車の先頭が stopX に止まる。pL〜pR が車庫の建物
+function makeHome(afterX) {
+  const stopX = afterX + config.riverDist + rand(0, 160) + 120;
+  const h = { kind: 'home', stopX, L: stopX + config.stopGap, R: stopX + config.stopGap + 10, pL: stopX - TRAIN_LEN - 46, pR: stopX + 40 };
+  S.homes.push(h);
+  return h;
+}
 // 場面を1つ作って、描画用のリストに入れる
 function makeScene(no, afterX) {
   const kind = config.sceneOrder[no % config.sceneOrder.length];
@@ -358,12 +390,14 @@ function updateTunnel(t, dt) {
 function nextScene() {
   S.sceneNo++;
   S.cur = S.upcoming;
-  S.upcoming = makeScene(S.sceneNo + 1, S.cur.R);
+  // おやすみの時間になっていたら、次の次の場面を車庫にする(すでに画面に見えている場面は差しかえない)
+  S.upcoming = S.sleepDue && S.cur.kind !== 'home' ? makeHome(S.cur.R) : makeScene(S.sceneNo + 1, S.cur.R);
   const gone = s => s !== S.cur && s !== S.upcoming && Math.max(s.R, s.pR || 0) < S.camX - 300;
   S.rivers = S.rivers.filter(s => !gone(s));
   S.crossings = S.crossings.filter(s => !gone(s));
   S.stations = S.stations.filter(s => !gone(s));
   S.tunnels = S.tunnels.filter(s => !gone(s));
+  S.homes = S.homes.filter(s => !gone(s));
   S.animals = S.animals.filter(a => a.x > S.camX - 200);
   go('RUN');
 }
@@ -489,6 +523,10 @@ function go(st) {
     S.stroke = []; S.primary = null; S.idle = 0; S.strokeDone = false; S.drawDist = 0; S.tapQueue = 0;
   } else if (st === 'REWARD') {
     startReward();
+  } else if (st === 'SLEEP') {
+    audio.brake(); setTimeout(() => audio.lullaby(), 900);
+    S.wave = false; S.zT = 1.5;
+    try { if (wl) { wl.release(); wl = null; } } catch (e) {}
   }
 }
 // 駅: ①動物が1匹降りる → ②タップ(どこでも)ごとに待っている動物が1匹ずつ乗る → ③全員乗ったら出発
@@ -529,7 +567,7 @@ function updateStation(st, dt) {
 }
 // 触れている指(手のひら以外)があれば、それをなぞりの指にして DRAW へ
 // 止まっているときのカメラ位置(停車位置〜右岸、駅はホーム全体が中央に来る)
-function sceneCenter(c) { return c.kind === 'station' ? (c.pL + c.pR) / 2 - S.W / 2 : (c.L - config.stopGap + c.R) / 2 - S.W / 2; }
+function sceneCenter(c) { return c.pL !== undefined ? (c.pL + c.pR) / 2 - S.W / 2 : (c.L - config.stopGap + c.R) / 2 - S.W / 2; }
 // 走行中のカメラ: ふだんは電車を左寄り(0.32)で追い、止まる位置が近づくと少し先回りして、
 // 電車が止まる前に止まる位置のカメラ(sceneCenter)に着いて静止する
 // 汽車の最後尾が画面に入っている限界のカメラ位置(これより右へは行かない=汽車を置いていかない)
@@ -608,6 +646,18 @@ function trainGeom() {
 
 function update(dt) {
   S.time += dt; S.stateT += dt;
+  // おやすみタイマー(遊んでいる時間だけ数える)
+  if (S.state !== 'READY' && S.state !== 'SLEEP') S.playT += dt;
+  if (S.sleepMin > 0 && S.playT >= S.sleepMin * 60 && !S.sleepDue) {
+    S.sleepDue = true;
+    // 次の場面がまだ画面の外なら、すぐ車庫に差しかえる(見えている場面は差しかえない)
+    const up = S.upcoming;
+    if (up && up.kind !== 'home' && S.cur.kind !== 'home' && Math.min(up.L, up.pL || up.L) - 140 > S.camX + S.W) {
+      for (const k of ['rivers', 'crossings', 'stations', 'tunnels']) S[k] = S[k].filter(s => s !== up);
+      if (up.kind === 'river') S.riverCount--;
+      S.upcoming = makeHome(S.cur.R);
+    }
+  }
   const cur = S.cur;
   switch (S.state) {
     case 'RUN': {
@@ -615,7 +665,7 @@ function update(dt) {
       // 川の手前で少し離れて止まる(なぞり始める左岸を電車がふさがないように)
       const stopAt = cur.L - config.stopGap, dist = stopAt - S.trainX;
       moveTrain(dt, Math.min(config.vmax, 8 + dist * 1.6));
-      if (dist <= 0.6) { S.trainX = stopAt; S.vel = 0; S.geom = trainGeom(); go('STOP'); break; }
+      if (dist <= 0.6) { S.trainX = stopAt; S.vel = 0; S.geom = trainGeom(); go(cur.kind === 'home' ? 'SLEEP' : 'STOP'); break; }
       // 止まる前でも、減速が始まったら(川や踏切が見えてきたら)なぞり/タップを受け付ける。電車はそのまま止まる位置まで進む
       // 川(踏切)の全体が画面に入ったら受け付ける(カメラが移動中でも。なぞり中はカメラを止める)
       const armed = cur.L - 30 - S.camX > 0 && (cur.L + cur.R) / 2 + 40 - S.camX < S.W;
@@ -625,6 +675,11 @@ function update(dt) {
     }
     case 'STOP':
       if (S.stateT > 0.35) go('GUIDE');
+      break;
+    case 'SLEEP':
+      // おやすみ: Zzz がゆっくりのぼる。進まない(親メニューの「もういちど」で再開)
+      S.zT -= dt;
+      if (S.zT <= 0) { S.zT = 1.4; const g = S.geom[(Math.random() * S.geom.length) | 0]; if (g) addP({ type: 'zzz', x: g.cx + 10, y: g.cy - 50, vx: 6, vy: -12, g: 0, life: 3, max: 3, size: rand(7, 10), color: '#c9d4ff' }); }
       break;
     case 'GUIDE':
       S.idle += dt;
@@ -730,7 +785,7 @@ function update(dt) {
   S.geom = trainGeom();
   const e = S.geom[0];
   S.smokeT -= dt;
-  if (S.smokeT <= 0 && e && S.state !== 'STOP' && !trainHidden()) { smoke(e.chim.x, e.chim.y); S.smokeT = S.vel > 5 ? 0.1 : 0.35; }
+  if (S.smokeT <= 0 && e && S.state !== 'STOP' && S.state !== 'SLEEP' && !trainHidden()) { smoke(e.chim.x, e.chim.y); S.smokeT = S.vel > 5 ? 0.1 : 0.35; }
 
   let target;
   // 場面が切りかわったフレームでも新しい場面を見る(更新の最初に読んだ cur は古い場面のことがある)
@@ -762,7 +817,7 @@ function update(dt) {
   else if (S.state === 'PASS') target = Math.min(Math.max(center, S.trainX - 0.85 * S.W), cc.x - 120);
   // 渡りはじめは、汽車の動きに合わせてカメラも止まった状態から動きだす
   else if (S.state === 'CROSS') target = Math.min(Math.max(center, S.trainX - 0.62 * S.W), Math.max(trainKeep(), S.camX));
-  else target = cc.kind === 'station' ? center : Math.min(center, Math.max(trainKeep(), S.camX));
+  else target = cc.pL !== undefined ? center : Math.min(center, Math.max(trainKeep(), S.camX));
   // どの場面の切りかえでもカメラが飛ばないよう、1フレームで動ける量に上限をつける(電車の速さ+ゆとり)
   const want = (target - S.camX) * (1 - Math.exp(-dt * 3.2));
   const lim = S.state === 'DRAW' ? 110 * dt : (S.vel * 1.25 + 320) * dt;
@@ -783,7 +838,8 @@ function toWorld(cx, cy) { return { x: cx / S.s + S.camX, y: cy / S.s - S.oy }; 
 let menuTimer = null, menuStart = null;
 function onDown(e) {
   e.preventDefault();
-  audio.init(); lockScreen();
+  audio.init();
+  if (S.state !== 'SLEEP') lockScreen();
   if (S.menuOpen) return;
   if (e.clientX > S.cw - config.menuZone && e.clientY < config.menuZone) {
     menuStart = { x: e.clientX, y: e.clientY, id: e.pointerId };
@@ -794,6 +850,12 @@ function onDown(e) {
   const palm = e.pointerType === 'touch' && (e.width > config.palmSize || e.height > config.palmSize);
   const ent = { wx: w.x, wy: w.y, palm };
   S.active.set(e.pointerId, ent);
+  if (!palm && S.state === 'SLEEP') {
+    // おやすみ中: 星がきらっと光って、やさしい音だけ
+    stars(w.x, w.y, 4);
+    if (S.time - S.lastPon > 0.4) { S.lastPon = S.time; audio.tone(1568, { dur: 0.5, gain: 0.05 }); }
+    return;
+  }
   if (!palm) {
     buzz(6);
     // 最初のタッチで出発(このタッチで音も解禁される)
@@ -868,12 +930,36 @@ window.addEventListener('pointercancel', onUp);
 /* ================= parent menu / screen ================= */
 const menuEl = document.getElementById('menu'), rotateEl = document.getElementById('rotate');
 const mSound = document.getElementById('mSound'), mFull = document.getElementById('mFull');
-function openMenu() { menuStart = null; S.menuOpen = true; menuEl.style.display = 'flex'; S.active.clear(); }
+function openMenu() { menuStart = null; S.menuOpen = true; menuEl.style.display = 'flex'; S.active.clear(); mWake.style.display = S.state === 'SLEEP' ? 'flex' : 'none'; }
 function closeMenu() { S.menuOpen = false; menuEl.style.display = 'none'; }
+function wakeUp() {
+  if (S.state !== 'SLEEP') return;
+  S.playT = 0; S.sleepDue = false;
+  if (periodNow().night) S.period++;
+  audio.init(); lockScreen(); audio.whistle(); S.jiggle = 0.4;
+  nextScene();
+}
 function syncSound() { mSound.dataset.muted = audio.muted ? '1' : '0'; }
 syncSound();
 mSound.addEventListener('click', e => { e.stopPropagation(); audio.init(); audio.setMuted(!audio.muted); syncSound(); });
 document.getElementById('mClose').addEventListener('click', e => { e.stopPropagation(); closeMenu(); });
+// おやすみタイマー: なし → 5 → 10 → 15 → 20分 → なし
+const mSleep = document.getElementById('mSleep'), mWake = document.getElementById('mWake');
+function syncSleep() { mSleep.dataset.min = S.sleepMin; mSleep.querySelector('span').textContent = S.sleepMin ? S.sleepMin : '-'; }
+syncSleep();
+mSleep.addEventListener('click', e => {
+  e.stopPropagation();
+  const opts = [0, 5, 10, 15, 20];
+  S.sleepMin = opts[(opts.indexOf(S.sleepMin) + 1) % opts.length];
+  S.playT = 0; S.sleepDue = false;
+  try { localStorage.setItem('nazotte.sleepMin', String(S.sleepMin)); } catch (err) {}
+  syncSleep();
+});
+// もういちど: 朝になって走り出す
+mWake.addEventListener('click', e => {
+  e.stopPropagation();
+  closeMenu(); wakeUp();
+});
 const fsEl = document.documentElement;
 const canFs = !!(fsEl.requestFullscreen || fsEl.webkitRequestFullscreen);
 if (!canFs) mFull.style.display = 'none';
@@ -1689,13 +1775,13 @@ function drawNight(xs, xe) {
     for (const g2 of S.geom) {
       if (inTunnel(g2.cx + (g2.def.engine ? 20 : 0))) continue;
       ctx.save(); ctx.translate(g2.cx, g2.cy); ctx.rotate(g2.ang);
-      if (g2.def.engine) {
+      if (g2.def.engine && S.state !== 'SLEEP') {
         // 前を照らすライト
         const lg2 = ctx.createLinearGradient(38, 0, 150, 0); lg2.addColorStop(0, 'rgba(255,240,170,.42)'); lg2.addColorStop(1, 'rgba(255,240,170,0)');
         ctx.fillStyle = lg2; ctx.beginPath(); ctx.moveTo(38, -36); ctx.lineTo(150, -64); ctx.lineTo(150, 6); ctx.lineTo(38, -30); ctx.closePath(); ctx.fill();
         circ(38.5, -34, 7, 'rgba(255,250,200,.6)');
         rr(-28.5, -50, 18, 16, 5); ctx.fillStyle = 'rgba(255,200,110,.35)'; ctx.fill();
-      } else {
+      } else if (!g2.def.engine) {
         for (const wx of [-20, 4]) { rr(wx, -34, 16, 15, 4.5); ctx.fillStyle = 'rgba(255,200,110,.4)'; ctx.fill(); }
         const wg = ctx.createRadialGradient(0, -26, 4, 0, -26, 34); wg.addColorStop(0, 'rgba(255,190,100,.22)'); wg.addColorStop(1, 'rgba(255,190,100,0)');
         ctx.fillStyle = wg; ctx.fillRect(-34, -60, 68, 68);
@@ -1726,6 +1812,30 @@ function drawNight(xs, xe) {
     ctx.fillStyle = fg; ctx.fillRect(x - 9, y - 9, 18, 18);
   }
   ctx.restore();
+}
+
+/* ================= render: home(おやすみの車庫) ================= */
+function drawHome(h, front) {
+  const a = h.pL, b = h.pR, top = GY - 96, cx = (a + b) / 2;
+  if (front) {
+    // 手前の柱
+    for (const x of [a + 6, b - 6]) { rr(x - 5, top + 14, 10, GY + 6 - top - 14, 3); fs('#b97a45', 'rgba(80,48,22,.6)', 1.2); }
+    return;
+  }
+  // 奥の壁(木の板)とまるい窓
+  rr(a + 4, top + 10, b - a - 8, GY + 4 - top - 10, 4);
+  const g = ctx.createLinearGradient(0, top, 0, GY); g.addColorStop(0, '#f0c48a'); g.addColorStop(1, '#d39a5c');
+  fs(g, 'rgba(90,56,26,.5)', 1.3);
+  ctx.strokeStyle = 'rgba(120,76,36,.25)'; ctx.lineWidth = 1.2;
+  for (let x = a + 22; x < b - 8; x += 18) { ctx.beginPath(); ctx.moveTo(x, top + 14); ctx.lineTo(x, GY + 2); ctx.stroke(); }
+  for (const wx of [a + 44, b - 44]) { circ(wx, top + 36, 12, '#ffe9a8', 'rgba(90,56,26,.6)', 2); ctx.strokeStyle = 'rgba(90,56,26,.5)'; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.moveTo(wx - 12, top + 36); ctx.lineTo(wx + 12, top + 36); ctx.moveTo(wx, top + 24); ctx.lineTo(wx, top + 48); ctx.stroke(); }
+  // まるい屋根
+  ctx.beginPath(); ctx.moveTo(a - 12, top + 18); ctx.quadraticCurveTo(cx, top - 48, b + 12, top + 18); ctx.lineTo(b + 4, top + 22); ctx.quadraticCurveTo(cx, top - 6, a - 4, top + 22); ctx.closePath();
+  const rgr = ctx.createLinearGradient(0, top - 30, 0, top + 16); rgr.addColorStop(0, '#7f8fd8'); rgr.addColorStop(1, '#5462a8');
+  fs(rgr, 'rgba(40,40,90,.6)', 1.4);
+  // 文字のかわりに、お月さまと星の看板
+  rr(cx - 20, top - 22, 40, 18, 6); fs('#fffaf0', 'rgba(80,60,40,.55)', 1.2);
+  circ(cx - 7, top - 13, 5.5, '#ffd84a'); ctx.save(); ctx.translate(cx + 8, top - 13); starPath(5); fs('#9ab0ff', null); ctx.restore();
 }
 
 /* ================= render: crossing ================= */
@@ -1819,7 +1929,7 @@ function drawCar(g) {
   if (S.jiggle > 0) { const k = S.jiggle / 0.4, q = Math.sin(k * 22) * 0.09 * k; ctx.scale(1 + q, 1 - q); }
   if (c.engine) {
     if (spr('engine', 0, 0)) {
-      if (S.time % 3.4 < 0.13) { ctx.beginPath(); ctx.moveTo(21.5, -30); ctx.quadraticCurveTo(26.5, -27, 31.5, -30); ctx.strokeStyle = '#6b2a2a'; ctx.lineWidth = 2; ctx.stroke(); }
+      if (S.state === 'SLEEP' || S.time % 3.4 < 0.13) { ctx.beginPath(); ctx.moveTo(21.5, -30); ctx.quadraticCurveTo(26.5, -27, 31.5, -30); ctx.strokeStyle = '#6b2a2a'; ctx.lineWidth = 2; ctx.stroke(); }
       else { circ(28.3, -30, 3.3, '#2a211c'); circ(29.4, -31.4, 1.1, '#fff'); }
     } else drawEngineSimple(c);
     drawWheel(-20, -7, 7); drawWheel(0, -7, 7); drawWheel(20, -7, 7);
@@ -1845,6 +1955,17 @@ function drawCar(g) {
       ctx.save(); rr(wx - 8, -34, 16, 15, 4.5); ctx.clip(); ctx.lineCap = 'round';
       ctx.strokeStyle = col.ol; ctx.lineWidth = 3.6; ctx.beginPath(); ctx.moveTo(bx, -18); ctx.lineTo(hx, hy); ctx.stroke(); circ(hx, hy, 2.9, col.ol);
       ctx.strokeStyle = col.arm; ctx.lineWidth = 2.2; ctx.beginPath(); ctx.moveTo(bx, -18); ctx.lineTo(hx, hy); ctx.stroke(); circ(hx, hy, 2.2, col.arm);
+      ctx.restore();
+    }
+    // おやすみ: 窓のカーテンをしめる
+    if (S.state === 'SLEEP') for (const wx of [-12, 12]) {
+      const u = clamp(S.stateT / 1.5, 0, 1);
+      ctx.save(); rr(wx - 8, -34, 16, 15, 4.5); ctx.clip();
+      for (const sd of [-1, 1]) {
+        rr(wx + (sd < 0 ? -8 : 8 - 8 * u), -34, 8 * u, 15, 2); ctx.fillStyle = '#f5b3c4'; ctx.fill();
+        ctx.strokeStyle = 'rgba(190,100,130,.5)'; ctx.lineWidth = 0.8; ctx.beginPath();
+        for (let q = 1; q < 3; q++) { const x = wx + sd * (8 - 8 * u * q / 3); ctx.moveTo(x, -34); ctx.lineTo(x, -19); } ctx.stroke();
+      }
       ctx.restore();
     }
     drawWheel(-12, -7, 6); drawWheel(12, -7, 6);
@@ -1903,6 +2024,12 @@ function drawParticles() {
     else if (p.type === 'star') { ctx.rotate(p.rot); starPath(p.size); fs(p.color, OUTLINE, 1.2); }
     else if (p.type === 'conf') { ctx.rotate(p.rot); ctx.fillStyle = p.color; ctx.fillRect(-p.size / 2, -p.size / 4, p.size, p.size / 2); }
     else if (p.type === 'smoke') { circ(0, 0, p.size * (1.6 - k * 0.6), p.color); }
+    else if (p.type === 'zzz') {
+      // Zの形(文字ではなく線で描く)
+      const s = p.size * (1.4 - k * 0.4);
+      ctx.globalAlpha = Math.min(1, k * 1.5) * 0.9; ctx.lineWidth = 2.4; ctx.strokeStyle = '#eef2ff';
+      ctx.beginPath(); ctx.moveTo(-s / 2, -s / 2); ctx.lineTo(s / 2, -s / 2); ctx.lineTo(-s / 2, s / 2); ctx.lineTo(s / 2, s / 2); ctx.stroke();
+    }
     else if (p.type === 'drop') { ctx.beginPath(); ctx.moveTo(0, -6); ctx.quadraticCurveTo(3.2, 0, 0, 2.6); ctx.quadraticCurveTo(-3.2, 0, 0, -6); fs(p.color, 'rgba(60,120,180,.5)', 0.8); }
     else if (p.type === 'flake') { ctx.translate(Math.sin(S.time * 2 + p.ph) * 4, 0); circ(0, 0, p.size, 'rgba(255,255,255,.95)', 'rgba(150,180,220,.5)', 0.8); }
     else circ(0, 0, p.size * (0.4 + k * 0.6), p.color);
@@ -2023,12 +2150,14 @@ function render() {
   for (const c of S.crossings) if (c.R + 60 > xs && c.L - 60 < xe) drawCrossingBack(c);
   for (const st of S.stations) if (st.pR + 30 > xs && st.pL - 30 < xe) drawStationBack(st);
   for (const t of S.tunnels) if (t.R + 140 > xs && t.L - 140 < xe) drawMountain(t, false);
+  for (const h of S.homes) if (h.pR + 40 > xs && h.pL - 40 < xe) drawHome(h, false);
   for (const r of S.rivers) if (r.R > xs && r.L < xe) drawBridge(r);
   for (const g of S.geom) if (g.cy + S.hopY > GY - 3 && g.cy + S.hopY < GY + 3 && !inTunnel(g.cx)) {
     ctx.fillStyle = 'rgba(0,0,0,' + (0.2 - S.hopY * 0.006) + ')'; ctx.beginPath(); ctx.ellipse(g.cx, GY + 11, g.def.len / 2 - 2, 4, 0, 0, 6.2832); ctx.fill();
   }
   S.geom.slice().reverse().forEach(drawCar);
   for (const t of S.tunnels) if (t.R + 140 > xs && t.L - 140 < xe) drawMountain(t, true);
+  for (const h of S.homes) if (h.pR + 40 > xs && h.pL - 40 < xe) drawHome(h, true);
   for (const c of S.crossings) if (c.R + 60 > xs && c.L - 60 < xe) drawCrossingFront(c);
   for (const st of S.stations) if (st.pR + 30 > xs && st.pL - 30 < xe) drawStationFront(st);
   for (const a of S.animals) drawAnimal(a);
@@ -2039,6 +2168,8 @@ function render() {
   drawGuide();
   drawReadyHint();
   ctx.restore();
+  // おやすみ: 25秒かけて画面を暗くしていく
+  if (S.state === 'SLEEP') { ctx.fillStyle = 'rgba(10,12,30,' + Math.min(0.55, S.stateT / 25 * 0.55).toFixed(3) + ')'; ctx.fillRect(0, -S.oy, S.W, config.H + S.oy); }
   if (!S.lowFx) drawOverlay();
 }
 // 紙の粒子+周辺減光は、サイズが変わった時だけ作ってキャッシュし、毎フレームは1回の貼り付けだけにする
@@ -2091,7 +2222,7 @@ S.camX = S.trainX - 0.32 * S.W;
 S.geom = trainGeom();
 // 絵の準備ができてから始める(読み込みに失敗した絵は簡易描画で代用。最長2秒で開始)
 Promise.race([loadSprites(), new Promise(r => setTimeout(r, 2000))]).then(() => requestAnimationFrame(frame));
-if (/[?&]debug\b/.test(location.search)) window.__nz = { S, makeBridge, sag, config, SPR, ctx, drawAnimal, drawRider, drawCar, drawSky, sunPos, scenery, cloudList, audio, trainHidden };
+if (/[?&]debug\b/.test(location.search)) window.__nz = { S, makeBridge, sag, config, SPR, ctx, drawAnimal, drawRider, drawCar, drawSky, sunPos, scenery, cloudList, audio, trainHidden, wakeUp };
 })();
 </script>
 </body>
