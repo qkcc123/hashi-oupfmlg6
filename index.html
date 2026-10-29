@@ -1119,7 +1119,7 @@ async function lockScreen() {
     if ('wakeLock' in navigator && !wl) { wl = await navigator.wakeLock.request('screen'); wl.addEventListener('release', () => { wl = null; }); }
   } catch (e) {}
 }
-document.addEventListener('visibilitychange', () => { if (document.hidden) dropPointers(); else lockScreen(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) dropPointers(); else if (S.state !== 'SLEEP') lockScreen(); });
 window.addEventListener('blur', dropPointers);
 window.addEventListener('touchend', () => audio.init());
 
